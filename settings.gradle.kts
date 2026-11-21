@@ -4,10 +4,11 @@
 // https://docs.gradle.org/current/userguide/settings_file_basics.html
 
 dependencyResolutionManagement {
-    // Use Maven Central as the default repository (where Gradle will download dependencies) in all subprojects.
     @Suppress("UnstableApiUsage")
     repositories {
+        google()
         mavenCentral()
+        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
     }
 }
 

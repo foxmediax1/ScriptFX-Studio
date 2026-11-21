@@ -7,6 +7,7 @@ kotlin = "2.4.21"
 kotlinxDatetime = "0.8.0"
 kotlinxSerializationJSON = "1.11.0"
 kotlinxCoroutines = "1.10.2"
+compose-plugin = "1.7.3"
 
 [libraries]
 kotlinGradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
@@ -20,3 +21,5 @@ kotlinxEcosystem = ["kotlinxDatetime", "kotlinxSerialization", "kotlinxCoroutine
 
 [plugins]
 kotlinPluginSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+compose = { id = "org.jetbrains.compose", version.ref = "compose-plugin" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

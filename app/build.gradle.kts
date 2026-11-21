@@ -1,19 +1,26 @@
 plugins {
-    // Apply the shared build logic from a convention plugin.
-    // The shared code is located in `buildSrc/src/main/kotlin/kotlin-jvm.gradle.kts`.
     id("buildsrc.convention.kotlin-jvm")
-
-    // Apply the Application plugin to add support for building an executable JVM application.
-    application
+    // application  — убрать: конфликтует с compose.desktop (оба делают task "run")
+    alias(libs.plugins.compose)
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlinPluginSerialization)
 }
 
 dependencies {
-    // Project "app" depends on project "utils". (Project paths are separated with ":", so ":utils" refers to the top-level "utils" project.)
     implementation(project(":utils"))
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
+    implementation(libs.kotlinxSerialization)
 }
 
-application {
-    // Define the Fully Qualified Name for the application main class
-    // (Note that Kotlin compiles `App.kt` to a class with FQN `com.example.app.AppKt`.)
-    mainClass = "net.foxmediax.app.AppKt"
+compose.desktop {
+    application {
+        mainClass = "net.foxmediax.app.AppKt"
+        nativeDistributions {
+            packageName = "ScriptFX Studio"
+            packageVersion = "0.1.0"
+            description = "ScriptFX Story Engine Studio"
+            vendor = "FoxMediaX"
+        }
+    }
 }
