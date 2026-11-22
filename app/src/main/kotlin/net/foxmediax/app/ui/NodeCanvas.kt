@@ -2195,105 +2195,109 @@ fun NodeCanvas(
                                 }
                             )
                         }
-
-
-                        if (showGroupDialog) {
-                            AlertDialog(
-                                onDismissRequest = {
-                                    showGroupDialog = false
-                                    focusRequester.requestFocus()
-                                },
-                                title = {
-                                    Text(
-                                        if (editingGroupId == null) {
-                                            "Создать группу"
-                                        } else {
-                                            "Настроить группу"
-                                        }
-                                    )
-                                },
-                                text = {
-                                    Column(
-                                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                                    ) {
-                                        OutlinedTextField(
-                                            value = groupNameInput,
-                                            onValueChange = {
-                                                groupNameInput = it
-                                            },
-                                            modifier = Modifier.fillMaxWidth(),
-                                            label = {
-                                                Text("Название группы")
-                                            },
-                                            singleLine = true
-                                        )
-
-                                        Text(
-                                            "Цвет группы",
-                                            style = MaterialTheme.typography.labelMedium
-                                        )
-
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(9.dp)
-                                        ) {
-                                            NODE_GROUP_COLORS.forEachIndexed { index, argb ->
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(29.dp)
-                                                        .background(
-                                                            Color(argb.toULong()),
-                                                            CircleShape
-                                                        )
-                                                        .then(
-                                                            if (groupColorIndex == index) {
-                                                                Modifier.border(
-                                                                    width = 3.dp,
-                                                                    color = Color.White,
-                                                                    shape = CircleShape
-                                                                )
-                                                            } else {
-                                                                Modifier.border(
-                                                                    width = 1.dp,
-                                                                    color = Color(0xFF777487),
-                                                                    shape = CircleShape
-                                                                )
-                                                            }
-                                                        )
-                                                        .clickable {
-                                                            groupColorIndex = index
-                                                        }
-                                                )
-                                            }
-                                        }
-                                    }
-                                },
-                                confirmButton = {
-                                    TextButton(
-                                        enabled = groupNameInput.isNotBlank(),
-                                        onClick = {
-                                            saveGroupDialog()
-                                            focusRequester.requestFocus()
-                                        }
-                                    ) {
-                                        Text("Сохранить")
-                                    }
-                                },
-                                dismissButton = {
-                                    TextButton(
-                                        onClick = {
-                                            showGroupDialog = false
-                                            focusRequester.requestFocus()
-                                        }
-                                    ) {
-                                        Text("Отмена")
-                                    }
-                                }
-                            )
-                        }
-
                     }
                 }
             }
+        }
+
+        // -----------------------------------------------------
+        // NODE GROUP DIALOG
+        // Диалог находится вне Popup контекстного меню,
+        // поэтому не исчезает при закрытии самого меню.
+        // -----------------------------------------------------
+
+        if (showGroupDialog) {
+            AlertDialog(
+                onDismissRequest = {
+                    showGroupDialog = false
+                    focusRequester.requestFocus()
+                },
+                title = {
+                    Text(
+                        if (editingGroupId == null) {
+                            "Создать группу"
+                        } else {
+                            "Настроить группу"
+                        }
+                    )
+                },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = groupNameInput,
+                            onValueChange = {
+                                groupNameInput = it
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = {
+                                Text("Название группы")
+                            },
+                            singleLine = true
+                        )
+
+                        Text(
+                            "Цвет группы",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(9.dp)
+                        ) {
+                            NODE_GROUP_COLORS.forEachIndexed { index, argb ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(29.dp)
+                                        .background(
+                                            Color(argb.toULong()),
+                                            CircleShape
+                                        )
+                                        .then(
+                                            if (groupColorIndex == index) {
+                                                Modifier.border(
+                                                    width = 3.dp,
+                                                    color = Color.White,
+                                                    shape = CircleShape
+                                                )
+                                            } else {
+                                                Modifier.border(
+                                                    width = 1.dp,
+                                                    color = Color(0xFF777487),
+                                                    shape = CircleShape
+                                                )
+                                            }
+                                        )
+                                        .clickable {
+                                            groupColorIndex = index
+                                        }
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = groupNameInput.isNotBlank(),
+                        onClick = {
+                            saveGroupDialog()
+                            focusRequester.requestFocus()
+                        }
+                    ) {
+                        Text("Сохранить")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showGroupDialog = false
+                            focusRequester.requestFocus()
+                        }
+                    ) {
+                        Text("Отмена")
+                    }
+                }
+            )
         }
 
     }
