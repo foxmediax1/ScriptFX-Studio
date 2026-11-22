@@ -1,3 +1,4 @@
+
 package net.foxmediax.utils.nodes
 
 import java.util.ArrayDeque
@@ -54,23 +55,48 @@ object GraphValidator {
             )
         }
 
-        // Пустой граф.
+        // -------------------------------------------------
+        // EMPTY GRAPH
+        // -------------------------------------------------
+
         if (graph.nodes.isEmpty()) {
             error("Граф пустой. Добавь ноды сценария.")
             return issues
         }
 
-        // Уникальность ID.
+        // -------------------------------------------------
+        // NODE IDS
+        // -------------------------------------------------
+
+        graph.nodes.forEach { node ->
+            if (node.id.isBlank()) {
+                error("У ноды отсутствует ID.")
+            }
+
+            if (node.title.isBlank()) {
+                warning(
+                    "У ноды отсутствует название.",
+                    node.id
+                )
+            }
+        }
+
         graph.nodes
             .groupBy { it.id }
             .filterValues { it.size > 1 }
             .forEach { (id, _) ->
-                error("Повторяющийся ID ноды: $id", id)
+                error(
+                    "Повторяющийся ID ноды: $id",
+                    id
+                )
             }
 
         val nodesById = graph.nodes.associateBy { it.id }
 
-        // START и END.
+        // -------------------------------------------------
+        // START / END
+        // -------------------------------------------------
+
         val starts = graph.nodes.filter {
             it.kind == NodeKind.START
         }
@@ -80,11 +106,13 @@ object GraphValidator {
         }
 
         when {
-            starts.isEmpty() ->
+            starts.isEmpty() -> {
                 error("В графе отсутствует START.")
+            }
 
-            starts.size > 1 ->
+            starts.size > 1 -> {
                 error("В графе должно быть не больше одного START.")
+            }
         }
 
         if (ends.isEmpty()) {
@@ -93,7 +121,10 @@ object GraphValidator {
             )
         }
 
-        // Проверка соединений.
+        // -------------------------------------------------
+        // EDGES
+        // -------------------------------------------------
+
         graph.edges.forEach { edge ->
             val source = nodesById[edge.from]
             val target = nodesById[edge.to]
@@ -112,10 +143,7 @@ object GraphValidator {
 
             if (source != null) {
                 if (source.kind == NodeKind.IF) {
-                    if (
-                        edge.fromPort !in
-                        setOf("true", "next", "out")
-                    ) {
+                    if (edge.fromPort !in setOf("true", "next", "out")) {
                         error(
                             "IF: неизвестный выход '${edge.fromPort}'.",
                             source.id
@@ -145,9 +173,29 @@ object GraphValidator {
             }
         }
 
+        // Повторяющиеся связи.
+        graph.edges
+            .groupBy {
+                listOf(
+                    it.from,
+                    it.fromPort,
+                    it.to,
+                    it.toPort
+                )
+            }
+            .filterValues { it.size > 1 }
+            .forEach { (connection, _) ->
+                error(
+                    "Повторяющееся соединение: " +
+                            "${connection[0]} -> ${connection[2]}."
+                )
+            }
+
         // Один выход не должен вести сразу к нескольким нодам.
         graph.edges
-            .groupBy { it.from to it.fromPort }
+            .groupBy {
+                it.from to it.fromPort
+            }
             .filterValues { it.size > 1 }
             .forEach { (connection, _) ->
                 error(
@@ -157,9 +205,86 @@ object GraphValidator {
                 )
             }
 
-        // Проверка параметров нод.
+        // -------------------------------------------------
+        // NODE GROUPS
+        // -------------------------------------------------
+
+        graph.groups
+            .groupBy { it.id }
+            .filterValues { it.size > 1 }
+            .forEach { (id, _) ->
+                error(
+                    "Повторяющийся ID группы: $id"
+                )
+            }
+
+        val nodeMemberships = mutableMapOf<String, MutableList<String>>()
+
+        graph.groups.forEach { group ->
+
+            if (group.id.isBlank()) {
+                error("У группы отсутствует ID.")
+            }
+
+            if (group.title.isBlank()) {
+                warning(
+                    "У группы ${group.id} отсутствует название."
+                )
+            }
+
+            if (group.nodeIds.size < 2) {
+                warning(
+                    "Группа '${group.title}' содержит меньше двух узлов."
+                )
+            }
+
+            if (group.nodeIds.size != group.nodeIds.distinct().size) {
+                error(
+                    "Группа '${group.title}' содержит повторяющиеся узлы."
+                )
+            }
+
+            if (group.colorArgb !in 0L..0xFFFFFFFFL) {
+                warning(
+                    "Группа '${group.title}' содержит некорректный цвет."
+                )
+            }
+
+            group.nodeIds.forEach { nodeId ->
+
+                if (!nodesById.containsKey(nodeId)) {
+                    error(
+                        "Группа '${group.title}' ссылается на " +
+                                "несуществующую ноду '$nodeId'."
+                    )
+                }
+
+                nodeMemberships
+                    .getOrPut(nodeId) { mutableListOf() }
+                    .add(group.id)
+            }
+        }
+
+        // Нода не должна одновременно принадлежать
+        // нескольким независимым группам.
+        nodeMemberships
+            .filterValues { it.size > 1 }
+            .forEach { (nodeId, groupIds) ->
+                error(
+                    "Нода '$nodeId' одновременно принадлежит " +
+                            "нескольким группам: ${groupIds.joinToString()}.",
+                    nodeId
+                )
+            }
+
+        // -------------------------------------------------
+        // NODE PARAMETERS
+        // -------------------------------------------------
+
         graph.nodes.forEach { node ->
+
             when (node.kind) {
+
                 NodeKind.START -> {
                     if (graph.inEdges(node.id).isNotEmpty()) {
                         warning(
@@ -246,12 +371,14 @@ object GraphValidator {
                         )
                     }
 
-                    val hasTrue = graph.outEdges(node.id).any {
+                    val outgoing = graph.outEdges(node.id)
+
+                    val hasTrue = outgoing.any {
                         it.fromPort == "true" ||
                                 it.fromPort == "out"
                     }
 
-                    val hasNext = graph.outEdges(node.id).any {
+                    val hasNext = outgoing.any {
                         it.fromPort == "next"
                     }
 
@@ -286,7 +413,10 @@ object GraphValidator {
             }
         }
 
-        // Построение списка смежности.
+        // -------------------------------------------------
+        // ADJACENCY
+        // -------------------------------------------------
+
         val adjacency = graph.edges
             .filter { edge ->
                 nodesById.containsKey(edge.from) &&
@@ -294,12 +424,16 @@ object GraphValidator {
             }
             .groupBy { it.from }
             .mapValues { (_, edges) ->
-                edges.map { it.to }
+                edges.map { it.to }.distinct()
             }
 
-        // Поиск циклов.
+        // -------------------------------------------------
+        // CYCLE DETECTION
+        // -------------------------------------------------
+
         val visited = mutableSetOf<String>()
         val active = mutableSetOf<String>()
+
         var cycleFound = false
 
         fun detectCycle(id: String) {
@@ -337,7 +471,10 @@ object GraphValidator {
             )
         }
 
-        // Проверка достижимости нод от START.
+        // -------------------------------------------------
+        // REACHABILITY
+        // -------------------------------------------------
+
         val start = starts.firstOrNull()
 
         if (start != null) {
@@ -366,6 +503,13 @@ object GraphValidator {
                         node.id
                     )
                 }
+
+            if (graph.outEdges(start.id).isEmpty()) {
+                warning(
+                    "START не подключён ни к одной ноде.",
+                    start.id
+                )
+            }
         }
 
         return issues
