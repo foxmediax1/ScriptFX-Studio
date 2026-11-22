@@ -1,6 +1,10 @@
+
 package net.foxmediax.app
 
-import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import net.foxmediax.app.project.ProjectService
@@ -15,30 +19,41 @@ sealed interface Screen {
 }
 
 fun main() = application {
-    val service = remember { ProjectService() }
-    var screen by remember { mutableStateOf<Screen>(Screen.Home) }
+    val service = remember {
+        ProjectService()
+    }
+
+    var screen by remember {
+        mutableStateOf<Screen>(Screen.Home)
+    }
 
     Window(
         onCloseRequest = ::exitApplication,
-        title = "ScriptFX Studio",
+        title = "ScriptFX Studio"
     ) {
         ScriptFXStudioTheme {
-            when (val s = screen) {
-                is Screen.Home -> StudioHome(
-                    service = service,
-                    onOpenProject = { root ->
-                        screen = Screen.Workspace(root)
-                    }
-                )
+            when (val currentScreen = screen) {
+
+                Screen.Home -> {
+                    StudioHome(
+                        service = service,
+                        onOpenProject = { root ->
+                            screen = Screen.Workspace(root)
+                        }
+                    )
+                }
 
                 is Screen.Workspace -> {
-                    val opened = remember(s.root) {
-                        service.openProject(s.root)
+                    val opened = remember(currentScreen.root) {
+                        service.openProject(currentScreen.root)
                     }
 
                     ProjectWorkspace(
                         project = opened.manifest,
-                        projectRoot = opened.root
+                        projectRoot = opened.root,
+                        onBackToHome = {
+                            screen = Screen.Home
+                        }
                     )
                 }
             }
