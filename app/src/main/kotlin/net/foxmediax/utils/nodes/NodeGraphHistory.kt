@@ -12,8 +12,6 @@ class NodeGraphHistory(
     private val undoStack = ArrayDeque<String>()
     private val redoStack = ArrayDeque<String>()
 
-    private var lastCheckpoint: String? = null
-
     val canUndo: Boolean
         get() = undoStack.isNotEmpty()
 
@@ -27,23 +25,21 @@ class NodeGraphHistory(
         get() = redoStack.size
 
     /**
-     * Stores the graph state before an action takes place.
-     * Call this before modifying nodes, edges, or parameters.
+     * Stores the current graph state before an edit.
      */
     fun checkpoint(graph: NodeGraph) {
         val snapshot = graph.toJson()
 
-        if (snapshot != lastCheckpoint) {
+        // Do not store duplicate consecutive states.
+        if (undoStack.lastOrNull() != snapshot) {
             undoStack.addLast(snapshot)
 
             while (undoStack.size > maxHistory.coerceAtLeast(1)) {
                 undoStack.removeFirst()
             }
-
-            lastCheckpoint = snapshot
         }
 
-        // Любое новое редактирование отменяет возможность Redo.
+        // A new edit invalidates the redo branch.
         redoStack.clear()
     }
 
@@ -53,39 +49,42 @@ class NodeGraphHistory(
     fun undo(current: NodeGraph): NodeGraph? {
         if (undoStack.isEmpty()) return null
 
+        val targetSnapshot = undoStack.lastOrNull() ?: return null
+
+        // Decode before changing either stack.
+        val restored = decode(targetSnapshot) ?: return null
+
+        undoStack.removeLast()
         redoStack.addLast(current.toJson())
 
-        val snapshot = undoStack.removeLast()
-        lastCheckpoint = snapshot
-
-        return decode(snapshot)
+        return restored
     }
 
     /**
-     * Reapplies the last undone action.
+     * Reapplies the last undone graph state.
      */
     fun redo(current: NodeGraph): NodeGraph? {
         if (redoStack.isEmpty()) return null
 
+        val targetSnapshot = redoStack.lastOrNull() ?: return null
+        val restored = decode(targetSnapshot) ?: return null
+
+        redoStack.removeLast()
         undoStack.addLast(current.toJson())
 
         while (undoStack.size > maxHistory.coerceAtLeast(1)) {
             undoStack.removeFirst()
         }
 
-        val snapshot = redoStack.removeLast()
-        lastCheckpoint = snapshot
-
-        return decode(snapshot)
+        return restored
     }
 
     /**
-     * Resets the history when a different graph is opened.
+     * Clears history when another scenario is opened.
      */
     fun reset(graph: NodeGraph) {
         undoStack.clear()
         redoStack.clear()
-        lastCheckpoint = graph.toJson()
     }
 
     fun clearRedo() {
