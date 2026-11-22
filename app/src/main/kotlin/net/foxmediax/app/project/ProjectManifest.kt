@@ -3,37 +3,36 @@ package net.foxmediax.app.project
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class ProjectManifest(
-    val schemaVersion: Int = 1,
-    val name: String,
-    val displayName: String = name,
-    val minecraft: MinecraftInfo = MinecraftInfo(),
-    val entry: EntryInfo = EntryInfo(),
-    val files: FilesIndex = FilesIndex(),
-    val tags: List<String> = emptyList()
-)
-
-@Serializable
-data class MinecraftInfo(
-    val minVersion: String = "26.1.2"
-)
-
-@Serializable
 data class EntryInfo(
-    val defaultScenario: String = "intro"
+    val scenario: String = "scenarios/intro.sfxs",
+    val npc: String = "",
+    val quest: String = "",
+    val trigger: String = "",
+    val cutscene: String = "",
+    val hud: String = "",
+    val particles: String = ""
 )
 
 @Serializable
 data class FilesIndex(
-    val scenarios: List<FileRef> = emptyList(),
-    val npc: List<FileRef> = emptyList(),
-    val video: List<FileRef> = emptyList(),
-    val audio: List<FileRef> = emptyList()
+    val scenarios: List<String> = emptyList(),
+    val npc: List<String> = emptyList(),
+    val quests: List<String> = emptyList(),
+    val triggers: List<String> = emptyList(),
+    val cutscenes: List<String> = emptyList(),
+    val hud: List<String> = emptyList(),
+    val particles: List<String> = emptyList(),
+    val videos: List<String> = emptyList(),
+    val audio: List<String> = emptyList()
 )
 
 @Serializable
-data class FileRef(
-    val id: String,
-    val path: String,
-    val kind: String = "script"
+data class ProjectManifest(
+    val schemaVersion: Int = 1,
+    val name: String,
+    val displayName: String = "",
+    val minecraft: String = "26.1",
+    val entry: EntryInfo = EntryInfo(),
+    val files: FilesIndex = FilesIndex(),
+    val exportPath: String = ""
 )

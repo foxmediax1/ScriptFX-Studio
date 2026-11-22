@@ -5,6 +5,8 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import net.foxmediax.utils.nodes.NodeGraph
+import net.foxmediax.utils.nodes.ScriptNodeSync
 
 class ProjectService(
     private val json: Json = Json {
@@ -18,41 +20,33 @@ class ProjectService(
         val manifest: ProjectManifest
     )
 
-    fun createProject(
-        parentDir: File,
-        rawName: String,
-        displayName: String? = null
-    ): Result<OpenedProject> = runCatching {
-        val name = sanitizeName(rawName)
-        require(name.isNotEmpty()) { "Пустое имя проекта" }
-
-        val root = File(parentDir, name)
-        require(!root.exists()) { "Папка уже существует: ${root.absolutePath}" }
-
-        root.mkdirs()
-        ProjectTemplate.dirs().forEach { File(root, it).mkdirs() }
-
-        val manifest = ProjectTemplate.buildManifest(name, displayName?.ifBlank { null } ?: name)
-        writeManifest(root, manifest)
-
-        File(root, "scenarios/intro.sfxs").writeText(ProjectTemplate.starterSfxs(name), Charsets.UTF_8)
-        File(root, "scenarios/intro.scn").writeText(ProjectTemplate.starterScn(), Charsets.UTF_8)
-        File(root, "npc/.gitkeep").writeText("")
-
-        OpenedProject(root, manifest)
+    fun createScenario(scenariosDir: File, name: String): File {
+        scenariosDir.mkdirs()
+        val f = File(scenariosDir, "$name.sfxs")
+        val graph = NodeGraph.defaultTemplate()
+        f.writeText(ScriptNodeSync.graphToText(graph, includeMeta = true))
+        File(scenariosDir, "$name.graph.json").writeText(graph.toJson())
+        return f
     }
 
-    fun openProject(root: File): Result<OpenedProject> = runCatching {
-        require(root.isDirectory) { "Не папка: ${root.path}" }
+    /** Создать проект в %APPDATA%\ScriptFX Studio\Projects\<name>. */
+    fun createProject(name: String): OpenedProject {
+        val root = File(defaultProjectsRoot(), sanitizeName(name))
+        if (root.exists()) error("Проект '$name' уже существует: ${root.absolutePath}")
+        root.mkdirs()
+        val manifest = ProjectTemplate.createProjectSkeleton(root, name)
+        return OpenedProject(root, manifest)
+    }
+
+    /** Открыть существующий проект (или восстановить скелет, если манифест потерян). */
+    fun openProject(root: File): OpenedProject {
         val manifestFile = File(root, "scriptfx.project.json")
-        val manifest = if (manifestFile.isFile) {
-            json.decodeFromString<ProjectManifest>(manifestFile.readText(Charsets.UTF_8))
+        val manifest = if (!manifestFile.isFile) {
+            ProjectTemplate.createProjectSkeleton(root, root.name)
         } else {
-            val m = ProjectTemplate.buildManifest(root.name)
-            writeManifest(root, m)
-            m
+            json.decodeFromString(ProjectManifest.serializer(), manifestFile.readText())
         }
-        OpenedProject(root.canonicalFile, manifest)
+        return OpenedProject(root, manifest)
     }
 
     fun listProjects(parentDir: File = defaultProjectsRoot()): List<File> {
@@ -67,15 +61,35 @@ class ProjectService(
         atomicWrite(File(root, "scriptfx.project.json"), json.encodeToString(manifest))
     }
 
+    /** %APPDATA%\ScriptFX Studio\Projects */
     fun defaultProjectsRoot(): File {
+        val base = studioDataRoot()
+        return File(base, "Projects").also { it.mkdirs() }
+    }
+
+    /** %APPDATA%\ScriptFX Studio */
+    fun studioDataRoot(): File {
         val appdata = System.getenv("APPDATA")
-        val base = if (!appdata.isNullOrBlank()) {
+        return if (!appdata.isNullOrBlank()) {
             File(appdata, "ScriptFX Studio")
         } else {
             File(System.getProperty("user.home"), "ScriptFX Studio")
-        }
-        return File(base, "Projects").also { it.mkdirs() }
+        }.also { it.mkdirs() }
     }
+
+    /** Типичный путь к проектам мода в Minecraft. */
+    fun defaultMinecraftProjectsRoot(): File {
+        val appdata = System.getenv("APPDATA")
+        return if (!appdata.isNullOrBlank()) {
+            File(appdata, ".minecraft/config/scriptfx/projects")
+        } else {
+            File(System.getProperty("user.home"), ".minecraft/config/scriptfx/projects")
+        }
+    }
+
+    /** Экспорт проекта Studio в папку Minecraft. */
+    fun exportToMinecraft(projectRoot: File, minecraftRoot: File): ExportService.Result =
+        ExportService.export(projectRoot, minecraftRoot)
 
     private fun sanitizeName(raw: String): String =
         raw.trim()
@@ -93,45 +107,5 @@ class ProjectService(
             StandardCopyOption.REPLACE_EXISTING,
             StandardCopyOption.ATOMIC_MOVE
         )
-    }
-
-    /** Корень данных студии: %APPDATA%\ScriptFX Studio\ */
-    fun studioDataRoot(): File {
-        val appdata = System.getenv("APPDATA")
-        return if (!appdata.isNullOrBlank()) {
-            File(appdata, "ScriptFX Studio")
-        } else {
-            File(System.getProperty("user.home"), "ScriptFX Studio")
-        }.also { it.mkdirs() }
-    }
-
-    /**
-     * Типичный путь к проектам мода в Minecraft.
-     * Пользователь может переопределить при экспорте.
-     */
-    fun defaultMinecraftProjectsRoot(): File {
-        val appdata = System.getenv("APPDATA")
-        return if (!appdata.isNullOrBlank()) {
-            File(appdata, ".minecraft/config/scriptfx/projects")
-        } else {
-            File(System.getProperty("user.home"), ".minecraft/config/scriptfx/projects")
-        }
-    }
-
-    /**
-     * Копирует содержимое проекта студии в папку мода:
-     * <minecraftProjectsRoot>/<projectName>/
-     *
-     * Позже можно фильтровать только runtime-файлы.
-     */
-    fun exportToMinecraft(
-        projectRoot: File,
-        minecraftProjectsRoot: File = defaultMinecraftProjectsRoot()
-    ): Result<File> = runCatching {
-        require(projectRoot.isDirectory) { "Нет папки проекта: ${projectRoot.path}" }
-        val target = File(minecraftProjectsRoot, projectRoot.name)
-        target.mkdirs()
-        projectRoot.copyRecursively(target, overwrite = true)
-        target
     }
 }
