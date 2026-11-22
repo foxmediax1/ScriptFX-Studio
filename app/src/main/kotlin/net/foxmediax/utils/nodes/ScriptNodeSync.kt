@@ -170,9 +170,9 @@ object ScriptNodeSync {
 
                         if (target.isNotEmpty()) {
                             output.append(prefix)
-                                .append("startscript ")
-                                .append(target)
-                                .append("\n")
+                                .append("startscript \"")
+                                .append(escapeQuoted(target))
+                                .append("\"\n")
                         } else {
                             output.append(prefix)
                                 .append("# ERROR: CALL target is empty\n")
