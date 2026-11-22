@@ -267,11 +267,18 @@ object ScriptNodeSync {
 
         fun parseSimple(line: String): GraphNode? {
             return when {
-                line == "startscript" -> {
+                line.startsWith("startscript ") -> {
+                    callCounter++
+
                     GraphNode(
-                        id = newId("start"),
-                        kind = NodeKind.START,
-                        title = "Начало скрипта"
+                        id = newId("call$callCounter"),
+                        kind = NodeKind.CALL,
+                        title = "Запустить сценарий",
+                        params = mapOf(
+                            "target" to unquoteArgument(
+                                line.removePrefix("startscript ")
+                            )
+                        )
                     )
                 }
 
@@ -362,7 +369,9 @@ object ScriptNodeSync {
                         kind = NodeKind.CALL,
                         title = "Запустить сценарий",
                         params = mapOf(
-                            "target" to line.removePrefix("call ").trim()
+                            "target" to unquoteArgument(
+                                line.removePrefix("call ")
+                            )
                         )
                     )
                 }
@@ -626,6 +635,22 @@ object ScriptNodeSync {
         } else {
             value
         }
+    }
+
+    private fun unquoteArgument(raw: String): String {
+        val value = raw.trim()
+
+        if (
+            value.length < 2 ||
+            value.first() != '"' ||
+            value.last() != '"'
+        ) {
+            return value
+        }
+
+        return value
+            .substring(1, value.lastIndex)
+            .replace("\\\"", "\"")
     }
 
     private fun escapeQuoted(value: String): String {
