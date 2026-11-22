@@ -8,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.unit.dp
 import net.foxmediax.utils.nodes.GraphIssue
 import net.foxmediax.utils.nodes.GraphIssueSeverity
@@ -66,31 +67,39 @@ fun NodeInspector(
                 color = StudioColors.Accent
             )
 
-            var titleEditing by remember(node.id) {
+            // -------------------------------------------------
+            // NODE TITLE
+            // -------------------------------------------------
+
+            var titleEditRecorded by remember(node.id) {
                 mutableStateOf(false)
             }
 
             OutlinedTextField(
                 value = node.title,
                 onValueChange = { newTitle ->
-                    if (!titleEditing) {
-                        controller.checkpoint(graph)
-                        titleEditing = true
-                    }
+                    if (newTitle != node.title) {
+                        if (!titleEditRecorded) {
+                            controller.checkpoint(graph)
+                            titleEditRecorded = true
+                        }
 
-                    node.title = newTitle
-                    onGraphChanged(graph)
+                        node.title = newTitle
+                        onGraphChanged(graph)
+                    }
                 },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { state ->
+                        if (!state.isFocused) {
+                            titleEditRecorded = false
+                        }
+                    },
                 label = {
                     Text("Название")
                 },
                 singleLine = true
             )
-
-            LaunchedEffect(node.id, node.title) {
-                titleEditing = false
-            }
 
             Text(
                 "ID: ${node.id}",
@@ -99,6 +108,10 @@ fun NodeInspector(
             )
 
             HorizontalDivider(color = StudioColors.Border)
+
+            // -------------------------------------------------
+            // PARAMETERS
+            // -------------------------------------------------
 
             Text(
                 "Параметры",
@@ -123,39 +136,74 @@ fun NodeInspector(
             }
 
             node.params.toSortedMap().forEach { (key, value) ->
-                var editing by remember(node.id, key) {
+
+                var editRecorded by remember(node.id, key) {
                     mutableStateOf(false)
                 }
 
                 Column(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        key,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = StudioColors.TextMuted
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            key,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = StudioColors.TextMuted
+                        )
+
+                        TextButton(
+                            onClick = {
+                                controller.checkpoint(graph)
+
+                                node.params = node.params - key
+
+                                onGraphChanged(graph)
+                            },
+                            contentPadding = PaddingValues(
+                                horizontal = 6.dp,
+                                vertical = 0.dp
+                            )
+                        ) {
+                            Text(
+                                "Удалить",
+                                color = StudioColors.Error,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
 
                     OutlinedTextField(
                         value = value,
                         onValueChange = { newValue ->
-                            if (!editing) {
-                                controller.checkpoint(graph)
-                                editing = true
-                            }
+                            if (newValue != value) {
+                                if (!editRecorded) {
+                                    controller.checkpoint(graph)
+                                    editRecorded = true
+                                }
 
-                            node.params = node.params + (key to newValue)
-                            onGraphChanged(graph)
+                                node.params = node.params + (key to newValue)
+
+                                onGraphChanged(graph)
+                            }
                         },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { state ->
+                                if (!state.isFocused) {
+                                    editRecorded = false
+                                }
+                            },
                         singleLine = true
                     )
-
-                    LaunchedEffect(node.id, key, value) {
-                        editing = false
-                    }
                 }
             }
+
+            // -------------------------------------------------
+            // ADD PARAMETER
+            // -------------------------------------------------
 
             var newKey by remember(selectedNodeId) {
                 mutableStateOf("")
@@ -222,6 +270,10 @@ fun NodeInspector(
                 Text("Добавить параметр")
             }
         }
+
+        // -----------------------------------------------------
+        // VALIDATION
+        // -----------------------------------------------------
 
         HorizontalDivider(color = StudioColors.Border)
 
