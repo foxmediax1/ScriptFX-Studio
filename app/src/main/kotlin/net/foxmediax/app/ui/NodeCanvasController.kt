@@ -1,3 +1,4 @@
+
 package net.foxmediax.app.ui
 
 import androidx.compose.runtime.mutableStateOf
@@ -6,7 +7,7 @@ import net.foxmediax.utils.nodes.NodeGraph
 import net.foxmediax.utils.nodes.NodeGraphHistory
 
 /**
- * Управляет NodeCanvas и историей изменений графа.
+ * Управляет NodeCanvas, камерой и историей изменений графа.
  */
 class NodeCanvasController {
 
@@ -19,6 +20,9 @@ class NodeCanvasController {
 
     internal var undoAction: (() -> Unit)? = null
     internal var redoAction: (() -> Unit)? = null
+
+    // Переход к узлу по ID.
+    internal var focusNodeAction: ((String) -> Unit)? = null
 
     val selectedNodeId = mutableStateOf<String?>(null)
 
@@ -50,7 +54,14 @@ class NodeCanvasController {
     }
 
     /**
-     * Создаёт снимок текущего графа перед изменением.
+     * Центрирует холст на указанном узле.
+     */
+    fun focusNode(nodeId: String) {
+        focusNodeAction?.invoke(nodeId)
+    }
+
+    /**
+     * Вызывать перед изменением графа.
      */
     fun checkpoint(graph: NodeGraph) {
         history.checkpoint(graph)
