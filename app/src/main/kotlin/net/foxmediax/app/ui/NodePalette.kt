@@ -9,13 +9,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import net.foxmediax.utils.nodes.GraphNode
 import net.foxmediax.utils.nodes.NodeKind
 
-/** Описание ноды в палитре. */
 data class PaletteEntry(
     val kind: NodeKind,
     val title: String,
@@ -23,14 +20,52 @@ data class PaletteEntry(
     val defaultParams: Map<String, String> = emptyMap()
 )
 
-val DefaultPalette: List<PaletteEntry> = listOf(
-    PaletteEntry(NodeKind.PRINT, "Сообщение в чат", "Вывести текст в чат игрока",
-        mapOf("text" to "Привет, мир!")),
-    PaletteEntry(NodeKind.WAIT, "Ожидание", "Подождать N мс", mapOf("ms" to "1000")),
-    PaletteEntry(NodeKind.DELAY, "Задержка", "Задержка сцены", mapOf("ms" to "1000")),
-    PaletteEntry(NodeKind.CALL, "Вызов", "Вызвать другой скрипт", mapOf("target" to "other.sfxs")),
-    PaletteEntry(NodeKind.IF, "Условие", "Ветвление по условию", mapOf("expr" to "true")),
-    PaletteEntry(NodeKind.SET, "Присвоить", "Установить переменную", mapOf("name" to "var", "value" to "0"))
+val DefaultPalette = listOf(
+    PaletteEntry(
+        kind = NodeKind.PRINT,
+        title = "Сообщение в чат",
+        description = "Вывести текст в чат игрока",
+        defaultParams = mapOf(
+            "text" to "Привет, мир!"
+        )
+    ),
+
+    PaletteEntry(
+        kind = NodeKind.WAIT,
+        title = "Ожидание",
+        description = "Приостановить сценарий на время",
+        defaultParams = mapOf(
+            "ms" to "1000"
+        )
+    ),
+
+    PaletteEntry(
+        kind = NodeKind.DELAY,
+        title = "Задержка",
+        description = "Приостановить сценарий на время",
+        defaultParams = mapOf(
+            "ms" to "1000"
+        )
+    ),
+
+    PaletteEntry(
+        kind = NodeKind.CALL,
+        title = "Запустить сценарий",
+        description = "Запустить другой сценарий параллельно",
+        defaultParams = mapOf(
+            "target" to "other.sfxs"
+        )
+    ),
+
+    PaletteEntry(
+        kind = NodeKind.IF,
+        title = "Условие IF",
+        description = "Выполнить блок при совпадении значения",
+        defaultParams = mapOf(
+            "variable" to "dialog_button",
+            "value" to "1"
+        )
+    )
 )
 
 @Composable
@@ -38,47 +73,91 @@ fun NodePalette(
     onAdd: (PaletteEntry) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var query by remember { mutableStateOf("") }
+    var query by remember {
+        mutableStateOf("")
+    }
+
     val filtered = remember(query) {
-        if (query.isBlank()) DefaultPalette
-        else DefaultPalette.filter {
-            it.title.contains(query, ignoreCase = true) ||
-                    it.description.contains(query, ignoreCase = true)
+        if (query.isBlank()) {
+            DefaultPalette
+        } else {
+            DefaultPalette.filter { entry ->
+                entry.title.contains(query, ignoreCase = true) ||
+                        entry.description.contains(query, ignoreCase = true) ||
+                        entry.kind.name.contains(query, ignoreCase = true)
+            }
         }
     }
 
     Column(
         modifier = modifier
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .background(StudioColors.Panel)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("Ноды", style = MaterialTheme.typography.titleMedium, color = Color(0xFFE8E8F0))
-        OutlinedTextField(
-            value = query, onValueChange = { query = it },
-            placeholder = { Text("Поиск…") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+        Text(
+            "Ноды",
+            style = MaterialTheme.typography.titleMedium,
+            color = StudioColors.Text
         )
-        HorizontalDivider()
+
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = {
+                Text("Поиск...")
+            },
+            singleLine = true
+        )
+
+        HorizontalDivider(
+            color = StudioColors.Border
+        )
+
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             items(filtered) { entry ->
                 Card(
-                    modifier = Modifier.fillMaxWidth().clickable { onAdd(entry) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onAdd(entry)
+                        },
                     shape = RoundedCornerShape(8.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E28))
+                    colors = CardDefaults.cardColors(
+                        containerColor = StudioColors.PanelRaised
+                    )
                 ) {
-                    Column(Modifier.padding(10.dp)) {
-                        Text(entry.title, color = Color(0xFFE8E8F0), fontSize = 13.sp)
-                        Text(entry.description, color = Color(0xFF9A9AB0), fontSize = 11.sp)
+                    Column(
+                        Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            entry.title,
+                            color = StudioColors.Text,
+                            fontSize = 13.sp
+                        )
+
+                        Text(
+                            entry.description,
+                            color = StudioColors.TextMuted,
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }
+
             if (filtered.isEmpty()) {
-                item { Text("Ничего не найдено", color = Color(0xFF9A9AB0)) }
+                item {
+                    Text(
+                        "Ничего не найдено",
+                        color = StudioColors.TextMuted,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         }
     }

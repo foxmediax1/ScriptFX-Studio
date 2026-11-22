@@ -1,20 +1,85 @@
 package net.foxmediax.app.ui
 
+import androidx.compose.runtime.mutableStateOf
 import net.foxmediax.utils.nodes.GraphNode
+import net.foxmediax.utils.nodes.NodeGraph
+import net.foxmediax.utils.nodes.NodeGraphHistory
 
 /**
- * Мост между родительским Composable и NodeCanvas.
- * Позволяет добавить ноду в центр холста (используется палитрой).
+ * Управляет NodeCanvas и историей изменений графа.
  */
 class NodeCanvasController {
-    internal var addNodeAtCenter: ((GraphNode) -> Unit)? = null
-    internal var resetView: (() -> Unit)? = null
+
+    private val history = NodeGraphHistory(100)
+
+    internal var addNodeAtCenterAction: ((GraphNode) -> Unit)? = null
+    internal var fitGraphAction: (() -> Unit)? = null
+    internal var zoomInAction: (() -> Unit)? = null
+    internal var zoomOutAction: (() -> Unit)? = null
+
+    internal var undoAction: (() -> Unit)? = null
+    internal var redoAction: (() -> Unit)? = null
+
+    val selectedNodeId = mutableStateOf<String?>(null)
+
+    val canUndo = mutableStateOf(false)
+    val canRedo = mutableStateOf(false)
 
     fun addNode(node: GraphNode) {
-        addNodeAtCenter?.invoke(node)
+        addNodeAtCenterAction?.invoke(node)
     }
 
-    fun resetView() {
-        resetView?.invoke()
+    fun fitGraph() {
+        fitGraphAction?.invoke()
+    }
+
+    fun zoomIn() {
+        zoomInAction?.invoke()
+    }
+
+    fun zoomOut() {
+        zoomOutAction?.invoke()
+    }
+
+    fun undo() {
+        undoAction?.invoke()
+    }
+
+    fun redo() {
+        redoAction?.invoke()
+    }
+
+    /**
+     * Создаёт снимок текущего графа перед изменением.
+     */
+    fun checkpoint(graph: NodeGraph) {
+        history.checkpoint(graph)
+        updateHistoryState()
+    }
+
+    /**
+     * Вызывать при открытии другого сценария.
+     */
+    fun resetHistory(graph: NodeGraph) {
+        history.reset(graph)
+        selectedNodeId.value = null
+        updateHistoryState()
+    }
+
+    internal fun undoGraph(current: NodeGraph): NodeGraph? {
+        val result = history.undo(current)
+        updateHistoryState()
+        return result
+    }
+
+    internal fun redoGraph(current: NodeGraph): NodeGraph? {
+        val result = history.redo(current)
+        updateHistoryState()
+        return result
+    }
+
+    private fun updateHistoryState() {
+        canUndo.value = history.canUndo
+        canRedo.value = history.canRedo
     }
 }
