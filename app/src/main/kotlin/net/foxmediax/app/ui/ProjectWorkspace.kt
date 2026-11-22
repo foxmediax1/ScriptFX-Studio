@@ -1304,23 +1304,45 @@ fun SettingsPane(
             )
         }
 
+
         Button(
-            enabled = !busy && exportPath.isNotBlank(),
+            enabled = !busy &&
+                    !validating &&
+                    exportPath.isNotBlank(),
             onClick = {
-                busy = true
-                validationFilter = null
+                val target = File(exportPath.trim())
 
-                val result = ExportService.export(
-                    projectRoot,
-                    File(exportPath)
-                )
+                validationScope.launch {
+                    busy = true
+                    validationFilter = null
 
-                lastResult = result
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            ExportService.export(
+                                projectRoot = projectRoot,
+                                targetDir = target
+                            )
+                        }
 
-                showValidationDetails =
-                    result.validation?.hasIssues == true
+                        lastResult = result
 
-                busy = false
+                        showValidationDetails =
+                            result.validation?.hasIssues == true
+
+                    } catch (e: Exception) {
+                        lastResult = ExportService.Result(
+                            success = false,
+                            filesCopied = 0,
+                            message = "Не удалось выполнить экспорт: " +
+                                    (e.message ?: "неизвестная ошибка")
+                        )
+
+                        showValidationDetails = false
+
+                    } finally {
+                        busy = false
+                    }
+                }
             }
         ) {
             Text(
@@ -1331,6 +1353,7 @@ fun SettingsPane(
                 }
             )
         }
+
 
         lastResult?.let { result ->
             val resultColor = if (result.success) {
