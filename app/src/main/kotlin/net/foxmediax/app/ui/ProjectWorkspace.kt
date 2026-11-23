@@ -56,7 +56,8 @@ enum class WorkspaceTab(val label: String) {
     CUTSCENES("Катсцены"),
     HUD("HUD"),
     PARTICLES("Частицы"),
-    SETTINGS("Настройки")
+    SETTINGS("Настройки"),
+    VERSIONS("Версии")
 }
 
 // =====================================================
@@ -127,6 +128,12 @@ fun ProjectWorkspace(
                             navigationNodeId = nodeId
                             tab = WorkspaceTab.SCENARIOS
                         }
+                    )
+                }
+
+                WorkspaceTab.VERSIONS -> {
+                    ProjectVersionsPane(
+                        projectRoot = projectRoot
                     )
                 }
 
