@@ -835,6 +835,7 @@ object ExportService {
     // EXPORT
     // =====================================================
 
+
     fun export(
         projectRoot: File,
         targetDir: File,
@@ -851,9 +852,9 @@ object ExportService {
 
         if (!projectRoot.isDirectory) {
             return Result(
-                false,
-                0,
-                "Проект не найден: ${projectRoot.absolutePath}"
+                success = false,
+                filesCopied = 0,
+                message = "Проект не найден: ${projectRoot.absolutePath}"
             )
         }
 
@@ -864,20 +865,41 @@ object ExportService {
 
         if (!projectManifest.isFile) {
             return Result(
-                false,
-                0,
-                "Нет scriptfx.project.json в ${projectRoot.absolutePath}"
+                success = false,
+                filesCopied = 0,
+                message = "Нет scriptfx.project.json в ${projectRoot.absolutePath}"
             )
         }
 
-        val projectName = subfolder ?: projectRoot.name
+        // -------------------------------------------------
+        // EXPORT PREVIEW / PREFLIGHT
+        // -------------------------------------------------
 
-        // Проверяем также имена сценариев в уже установленных проектах.
-        val validation = validateProject(
+        val preflight = ExportPreviewService.createPlan(
             projectRoot = projectRoot,
             targetDir = targetDir,
             subfolder = subfolder
         )
+
+        val validation = preflight.validation
+            ?: validateProject(
+                projectRoot = projectRoot,
+                targetDir = targetDir,
+                subfolder = subfolder
+            )
+
+        if (!preflight.canExport) {
+
+            val reason = preflight.error
+                ?: "Обнаружено конфликтов: ${preflight.conflicts}."
+
+            return Result(
+                success = false,
+                filesCopied = 0,
+                message = "Экспорт отменён. $reason",
+                validation = validation
+            )
+        }
 
         if (validation.hasErrors) {
             return Result(
@@ -892,6 +914,8 @@ object ExportService {
             )
         }
 
+        val projectName = subfolder ?: projectRoot.name
+
         val destRoot = File(
             targetDir,
             "config/scriptfx/projects/${sanitize(projectName)}"
@@ -903,7 +927,10 @@ object ExportService {
 
         return try {
 
-            // Проверяем путь до создания папки.
+            // ---------------------------------------------
+            // CHECK DESTINATION
+            // ---------------------------------------------
+
             if (!isSafeDestinationPath(targetDir, destRoot)) {
                 throw SecurityException(
                     "Папка экспорта находится за пределами Minecraft."
@@ -925,7 +952,6 @@ object ExportService {
                 )
             }
 
-            // Повторная проверка после создания папки.
             if (!isSafeDestinationPath(targetDir, destRoot)) {
                 throw SecurityException(
                     "Небезопасный путь папки экспорта."
@@ -988,7 +1014,7 @@ object ExportService {
                     .relativeTo(projectRoot)
                     .invariantSeparatorsPath
 
-                // Служебные и временные файлы Studio.
+                // Не экспортируем внутренние файлы Studio.
                 if (
                     relativePath.startsWith(".git/") ||
                     relativePath.endsWith(".tmp") ||
@@ -1003,8 +1029,7 @@ object ExportService {
                     return@forEach
                 }
 
-                // Studio хранит сценарии в scenarios/,
-                // Runtime загружает их из scripts/.
+                // Studio scenarios/ -> Runtime scripts/
                 val exportPath = if (
                     relativePath.startsWith("scenarios/") &&
                     src.extension.equals("sfxs", ignoreCase = true)
@@ -1042,17 +1067,65 @@ object ExportService {
                     )
                 }
 
+                // -----------------------------------------
+                // PROTECT MANAGED SCRIPTS
+                // -----------------------------------------
+
+                val managedPath = normalizeManagedScriptPath(
+                    exportPath
+                )
+
+                if (
+                    managedPath != null &&
+                    (
+                            destination.exists() ||
+                                    Files.isSymbolicLink(destination.toPath())
+                            )
+                ) {
+
+                    if (
+                        Files.isSymbolicLink(destination.toPath()) ||
+                        !destination.isFile
+                    ) {
+                        throw IOException(
+                            "Небезопасный файл назначения: $exportPath"
+                        )
+                    }
+
+                    val previousHash =
+                        previousManagedScripts[managedPath]
+                            ?: throw IOException(
+                                "Конфликт экспорта: файл '$exportPath' " +
+                                        "существует, но не принадлежит Studio."
+                            )
+
+                    val currentDestinationHash = sha256(destination)
+                    val currentSourceHash = sha256(src)
+
+                    // Разрешаем перезапись только если:
+                    // 1. Файл в Minecraft не меняли после предыдущего экспорта.
+                    // 2. Или он уже совпадает с текущим исходником.
+                    if (
+                        currentDestinationHash != previousHash &&
+                        currentDestinationHash != currentSourceHash
+                    ) {
+                        throw IOException(
+                            "Файл '$exportPath' изменён вручную. " +
+                                    "Перезапись отменена."
+                        )
+                    }
+                }
+
+                // -----------------------------------------
+                // COPY
+                // -----------------------------------------
+
                 src.copyTo(
                     destination,
                     overwrite = true
                 )
 
                 copied++
-
-                // В манифест попадают только runtime-сценарии.
-                val managedPath = normalizeManagedScriptPath(
-                    exportPath
-                )
 
                 if (managedPath != null) {
                     currentManagedScripts[managedPath] =
@@ -1079,7 +1152,10 @@ object ExportService {
                     relativePath
                 )
 
-                if (!isSafeDestinationPath(destRoot, staleFile)) {
+                if (
+                    !isSafeDestinationPath(destRoot, staleFile) ||
+                    Files.isSymbolicLink(staleFile.toPath())
+                ) {
                     preserved++
                     return@forEach
                 }
@@ -1098,8 +1174,7 @@ object ExportService {
                     previousManagedScripts[relativePath]
                         ?: return@forEach
 
-                // Если пользователь изменил экспортированный файл,
-                // Studio оставляет его нетронутым.
+                // Изменённый вручную файл не удаляем.
                 val currentHash = sha256(staleFile)
 
                 if (currentHash != previousHash) {
@@ -1176,20 +1251,25 @@ object ExportService {
             )
 
         } catch (e: IOException) {
+
             Result(
                 success = false,
                 filesCopied = 0,
                 message = "Ошибка экспорта: ${e.message}",
                 validation = validation
             )
+
         } catch (e: SecurityException) {
+
             Result(
                 success = false,
                 filesCopied = 0,
                 message = "Безопасность экспорта: ${e.message}",
                 validation = validation
             )
+
         } catch (e: Exception) {
+
             Result(
                 success = false,
                 filesCopied = 0,
@@ -1198,6 +1278,7 @@ object ExportService {
             )
         }
     }
+
 
     private fun sanitize(name: String): String {
         val sanitized = name
