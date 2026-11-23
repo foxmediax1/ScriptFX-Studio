@@ -1,4 +1,3 @@
-
 package net.foxmediax.app.ui
 
 import androidx.compose.foundation.background
@@ -31,6 +30,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.foxmediax.app.project.ExportPreviewService
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.text.input.TextFieldValue
 
 enum class CanvasMode {
     NODES,
@@ -393,6 +394,7 @@ fun PlaceholderPane(name: String) {
 // SCENARIOS PANE
 // =====================================================
 
+
 @Composable
 fun ScenariosPane(
     projectRoot: File,
@@ -400,6 +402,11 @@ fun ScenariosPane(
     navigationNodeId: String? = null,
     onNavigationHandled: () -> Unit = {}
 ) {
+
+    // =====================================================
+    // SCENARIO DIRECTORY
+    // =====================================================
+
     val scenariosDir = remember(projectRoot) {
         File(projectRoot, "scenarios").apply {
             mkdirs()
@@ -407,6 +414,7 @@ fun ScenariosPane(
     }
 
     fun getScenarioFiles(): List<File> {
+
         return scenariosDir.listFiles()
             ?.filter {
                 it.isFile &&
@@ -421,11 +429,16 @@ fun ScenariosPane(
             ?: emptyList()
     }
 
-    // Создание начального сценария.
+    // =====================================================
+    // INITIAL SCENARIO
+    // =====================================================
+
     val initialFile = remember(scenariosDir) {
+
         val existing = getScenarioFiles().firstOrNull()
 
         existing ?: run {
+
             val file = File(
                 scenariosDir,
                 "main.sfxs"
@@ -451,6 +464,10 @@ fun ScenariosPane(
         }
     }
 
+    // =====================================================
+    // STATE
+    // =====================================================
+
     var fileList by remember {
         mutableStateOf(getScenarioFiles())
     }
@@ -459,8 +476,8 @@ fun ScenariosPane(
         mutableStateOf<File?>(initialFile)
     }
 
-    var text by remember {
-        mutableStateOf("")
+    var textFieldValue by remember {
+        mutableStateOf(TextFieldValue(""))
     }
 
     var textModeBaseline by remember {
@@ -483,7 +500,6 @@ fun ScenariosPane(
         mutableIntStateOf(0)
     }
 
-    // Узел, на который нужно перейти после загрузки сценария.
     var pendingFocusNodeId by remember {
         mutableStateOf<String?>(null)
     }
@@ -492,13 +508,23 @@ fun ScenariosPane(
         NodeCanvasController()
     }
 
-    // -------------------------------------------------
+    val textHistory = remember {
+        TextEditorHistory(300)
+    }
+
+    val canUndoText by textHistory.canUndo
+    val canRedoText by textHistory.canRedo
+
+    // =====================================================
     // GRAPH CALLBACKS
-    // -------------------------------------------------
+    // =====================================================
 
     fun notifyGraphChanged(newGraph: NodeGraph) {
+
         graph = newGraph
+
         graphRevision++
+
         dirty = true
     }
 
@@ -506,17 +532,46 @@ fun ScenariosPane(
         fileList = getScenarioFiles()
     }
 
-    // -------------------------------------------------
+    // =====================================================
+    // TEXT HISTORY ACTIONS
+    // =====================================================
+
+    fun undoText() {
+
+        val restored = textHistory.undo(
+            textFieldValue
+        ) ?: return
+
+        textFieldValue = restored
+
+        dirty = restored.text != textModeBaseline
+    }
+
+    fun redoText() {
+
+        val restored = textHistory.redo(
+            textFieldValue
+        ) ?: return
+
+        textFieldValue = restored
+
+        dirty = restored.text != textModeBaseline
+    }
+
+    // =====================================================
     // SAVE SCENARIO
-    // -------------------------------------------------
+    // =====================================================
 
     fun persist() {
+
         val file = currentFile ?: return
 
         runCatching {
+
             when (mode) {
 
                 CanvasMode.NODES -> {
+
                     val output = ScriptNodeSync.graphToText(
                         graph = graph,
                         includeMeta = true
@@ -533,13 +588,20 @@ fun ScenariosPane(
                         graph.toJson()
                     )
 
-                    text = ScriptNodeSync.stripMeta(output)
+                    textFieldValue = TextFieldValue(
+                        ScriptNodeSync.stripMeta(output)
+                    )
                 }
 
                 CanvasMode.TEXT -> {
-                    file.writeText(text)
 
-                    // Старый JSON графа больше не соответствует тексту.
+                    file.writeText(
+                        textFieldValue.text
+                    )
+
+                    // После сохранения обновляем исходное состояние.
+                    textModeBaseline = textFieldValue.text
+
                     val sidecar = File(
                         file.parentFile,
                         "${file.nameWithoutExtension}.graph.json"
@@ -558,9 +620,11 @@ fun ScenariosPane(
             }
 
             dirty = false
+
             reloadFiles()
 
         }.onFailure { error ->
+
             println(
                 "ScriptFX Studio: не удалось сохранить сценарий: " +
                         error.message
@@ -568,16 +632,18 @@ fun ScenariosPane(
         }
     }
 
-    // -------------------------------------------------
+    // =====================================================
     // OPEN SCENARIO
-    // -------------------------------------------------
+    // =====================================================
 
     fun openFile(file: File) {
+
         if (dirty) {
             persist()
         }
 
         runCatching {
+
             val fileText = file.readText()
 
             val sidecar = File(
@@ -586,6 +652,7 @@ fun ScenariosPane(
             )
 
             val savedGraph = runCatching {
+
                 if (sidecar.isFile) {
                     NodeGraph.fromJson(
                         sidecar.readText()
@@ -593,11 +660,19 @@ fun ScenariosPane(
                 } else {
                     null
                 }
+
             }.getOrNull()
 
             currentFile = file
 
-            text = ScriptNodeSync.stripMeta(fileText)
+            textFieldValue = TextFieldValue(
+                ScriptNodeSync.stripMeta(fileText)
+            )
+
+            textModeBaseline = textFieldValue.text
+
+            // История другого сценария не переносится.
+            textHistory.reset()
 
             graph = savedGraph
                 ?: ScriptNodeSync.textToGraph(fileText)
@@ -618,6 +693,7 @@ fun ScenariosPane(
             dirty = false
 
         }.onFailure { error ->
+
             println(
                 "ScriptFX Studio: не удалось открыть ${file.name}: " +
                         error.message
@@ -625,41 +701,44 @@ fun ScenariosPane(
         }
     }
 
-    // -------------------------------------------------
+    // =====================================================
     // INITIAL SCENARIO
-    // -------------------------------------------------
+    // =====================================================
 
     LaunchedEffect(initialFile) {
-        // Если пришла команда открыть конкретный сценарий,
-        // первоначальный файл не должен перезаписывать выбор.
+
         if (navigationFileName == null) {
             openFile(initialFile)
         }
     }
 
-    // -------------------------------------------------
+    // =====================================================
     // NAVIGATION FROM VALIDATION
-    // -------------------------------------------------
+    // =====================================================
 
     LaunchedEffect(
         navigationFileName,
         navigationNodeId
     ) {
+
         val fileName = navigationFileName
             ?: return@LaunchedEffect
 
         val targetFile = File(projectRoot, fileName)
 
         if (targetFile.isFile) {
+
             openFile(targetFile)
 
             if (navigationNodeId != null) {
-                // Проблемные узлы открываем в Node Editor.
+
                 mode = CanvasMode.NODES
 
                 pendingFocusNodeId = navigationNodeId
             }
+
         } else {
+
             println(
                 "ScriptFX Studio: сценарий не найден: $fileName"
             )
@@ -668,21 +747,26 @@ fun ScenariosPane(
         onNavigationHandled()
     }
 
-    // -------------------------------------------------
+    // =====================================================
     // FOCUS PROBLEM NODE
-    // -------------------------------------------------
+    // =====================================================
 
     LaunchedEffect(
         graphRevision,
         pendingFocusNodeId
     ) {
+
         val nodeId = pendingFocusNodeId
             ?: return@LaunchedEffect
 
         if (graph.node(nodeId) != null) {
+
             canvasController.focusNode(nodeId)
+
             pendingFocusNodeId = null
+
         } else {
+
             println(
                 "ScriptFX Studio: узел $nodeId не найден " +
                         "в сценарии ${currentFile?.name}"
@@ -692,13 +776,14 @@ fun ScenariosPane(
         }
     }
 
-    // =================================================
+    // =====================================================
     // USER INTERFACE
-    // =================================================
+    // =====================================================
 
     Column(
         Modifier.fillMaxSize()
     ) {
+
         Row(
             Modifier.fillMaxSize()
         ) {
@@ -713,6 +798,7 @@ fun ScenariosPane(
                     .fillMaxHeight()
                     .background(StudioColors.Panel)
             ) {
+
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -723,6 +809,7 @@ fun ScenariosPane(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+
                     Text(
                         "Сценарии",
                         color = StudioColors.Text,
@@ -731,6 +818,7 @@ fun ScenariosPane(
 
                     IconButton(
                         onClick = {
+
                             val file = File(
                                 scenariosDir,
                                 "script_${System.currentTimeMillis()}.sfxs"
@@ -739,6 +827,7 @@ fun ScenariosPane(
                             val newGraph = NodeGraph.defaultTemplate()
 
                             runCatching {
+
                                 file.writeText(
                                     ScriptNodeSync.graphToText(
                                         newGraph,
@@ -754,8 +843,11 @@ fun ScenariosPane(
                                 )
 
                                 reloadFiles()
+
                                 openFile(file)
+
                             }.onFailure {
+
                                 println(
                                     "ScriptFX Studio: не удалось создать сценарий: " +
                                             it.message
@@ -763,6 +855,7 @@ fun ScenariosPane(
                             }
                         }
                     ) {
+
                         Icon(
                             Icons.Default.Add,
                             contentDescription = "Создать сценарий",
@@ -780,6 +873,7 @@ fun ScenariosPane(
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
+
                     items(
                         items = fileList,
                         key = {
@@ -800,6 +894,7 @@ fun ScenariosPane(
                                     }
                                 )
                                 .clickable {
+
                                     if (currentFile != file) {
                                         openFile(file)
                                     }
@@ -810,6 +905,7 @@ fun ScenariosPane(
                                 ),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+
                             Text(
                                 text = file.name,
                                 color = if (selected) {
@@ -824,12 +920,14 @@ fun ScenariosPane(
                 }
 
                 if (mode == CanvasMode.NODES) {
+
                     HorizontalDivider(
                         color = StudioColors.Border
                     )
 
                     NodePalette(
                         onAdd = { entry ->
+
                             val newNode = GraphNode(
                                 id = "${entry.kind.name.lowercase()}_" +
                                         System.currentTimeMillis(),
@@ -839,6 +937,7 @@ fun ScenariosPane(
                             )
 
                             canvasController.addNode(newNode)
+
                             dirty = true
                         },
                         modifier = Modifier
@@ -860,8 +959,9 @@ fun ScenariosPane(
                     .background(StudioColors.Background)
             ) {
 
-                // LAYER 0 — NODE EDITOR
-                // Не уничтожается при переключении режима.
+                // -----------------------------------------
+                // LAYER 0: NODE EDITOR
+                // -----------------------------------------
 
                 NodeCanvas(
                     graph = graph,
@@ -872,9 +972,12 @@ fun ScenariosPane(
                         .zIndex(0f)
                 )
 
-                // LAYER 1 — TEXT EDITOR
+                // -----------------------------------------
+                // LAYER 1: TEXT EDITOR
+                // -----------------------------------------
 
                 if (mode == CanvasMode.TEXT) {
+
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -888,19 +991,160 @@ fun ScenariosPane(
                                 onClick = {}
                             )
                     ) {
+
                         OutlinedTextField(
-                            value = text,
-                            onValueChange = {
-                                text = it
-                                dirty = true
+                            value = textFieldValue,
+
+                            onValueChange = { newValue ->
+
+                                if (
+                                    newValue.text != textFieldValue.text
+                                ) {
+
+                                    // Сохраняем предыдущее состояние
+                                    // только при изменении содержимого.
+                                    textHistory.checkpoint(
+                                        textFieldValue
+                                    )
+
+                                    dirty = true
+                                }
+
+                                // Сохраняем также новое положение курсора.
+                                textFieldValue = newValue
                             },
+
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(12.dp),
+                                .padding(12.dp)
+                                .onPreviewKeyEvent { event ->
+
+                                    if (
+                                        event.type != KeyEventType.KeyDown ||
+                                        !event.isCtrlPressed
+                                    ) {
+                                        return@onPreviewKeyEvent false
+                                    }
+
+                                    when {
+
+                                        event.key == Key.Z &&
+                                                event.isShiftPressed -> {
+                                            redoText()
+                                            true
+                                        }
+
+                                        event.key == Key.Z -> {
+                                            undoText()
+                                            true
+                                        }
+
+                                        event.key == Key.Y -> {
+                                            redoText()
+                                            true
+                                        }
+
+                                        else -> false
+                                    }
+                                },
+
                             textStyle = MaterialTheme.typography.bodyMedium
                         )
+
+                        // ---------------------------------
+                        // TEXT EDITOR TOOLBAR
+                        // ---------------------------------
+
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(24.dp)
+                                .zIndex(2f),
+                            color = StudioColors.PanelRaised,
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                StudioColors.Border
+                            )
+                        ) {
+
+                            Row(
+                                modifier = Modifier.padding(
+                                    horizontal = 6.dp,
+                                    vertical = 2.dp
+                                ),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+
+                                if (dirty) {
+                                    Text(
+                                        "●",
+                                        color = StudioColors.Warning,
+                                        modifier = Modifier.padding(
+                                            horizontal = 6.dp
+                                        )
+                                    )
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        persist()
+                                    }
+                                ) {
+                                    Text(
+                                        "Сохранить",
+                                        color = StudioColors.Text
+                                    )
+                                }
+
+                                VerticalDivider(
+                                    modifier = Modifier
+                                        .height(24.dp)
+                                        .padding(horizontal = 4.dp),
+                                    color = StudioColors.Border
+                                )
+
+                                TextButton(
+                                    enabled = canUndoText,
+                                    onClick = {
+                                        undoText()
+                                    }
+                                ) {
+                                    Text(
+                                        "↶ Undo",
+                                        color = if (canUndoText) {
+                                            StudioColors.Text
+                                        } else {
+                                            StudioColors.TextMuted
+                                        }
+                                    )
+                                }
+
+                                TextButton(
+                                    enabled = canRedoText,
+                                    onClick = {
+                                        redoText()
+                                    }
+                                ) {
+                                    Text(
+                                        "↷ Redo",
+                                        color = if (canRedoText) {
+                                            StudioColors.Text
+                                        } else {
+                                            StudioColors.TextMuted
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
+
                 } else {
+
+                    // -------------------------------------
+                    // NODE TOOLBAR
+                    // -------------------------------------
+
                     CanvasToolbar(
                         controller = canvasController,
                         dirty = dirty,
@@ -914,23 +1158,36 @@ fun ScenariosPane(
                     )
                 }
 
-                // LAYER 2 — MODE SWITCH
+                // -----------------------------------------
+                // LAYER 2: MODE SWITCH
+                // -----------------------------------------
 
                 FloatingActionButton(
                     onClick = {
+
                         when (mode) {
 
                             CanvasMode.NODES -> {
+
                                 persist()
 
-                                textModeBaseline = text
+                                textModeBaseline = textFieldValue.text
+
+                                textHistory.reset()
+
                                 mode = CanvasMode.TEXT
                             }
 
                             CanvasMode.TEXT -> {
-                                if (text != textModeBaseline) {
+
+                                if (
+                                    textFieldValue.text != textModeBaseline
+                                ) {
+
                                     val parsedGraph =
-                                        ScriptNodeSync.textToGraph(text)
+                                        ScriptNodeSync.textToGraph(
+                                            textFieldValue.text
+                                        )
 
                                     graph = parsedGraph
 
@@ -939,8 +1196,11 @@ fun ScenariosPane(
                                     )
 
                                     graphRevision++
+
                                     dirty = true
                                 }
+
+                                textHistory.reset()
 
                                 mode = CanvasMode.NODES
                             }
@@ -953,6 +1213,7 @@ fun ScenariosPane(
                     containerColor = StudioColors.Accent,
                     contentColor = Color.White
                 ) {
+
                     Icon(
                         Icons.Default.Edit,
                         contentDescription = "Переключить режим"
@@ -970,7 +1231,9 @@ fun ScenariosPane(
                     .fillMaxHeight()
                     .background(StudioColors.Panel)
             ) {
+
                 if (mode == CanvasMode.NODES) {
+
                     NodeInspector(
                         graph = graph,
                         selectedNodeId = canvasController.selectedNodeId.value,
@@ -984,15 +1247,21 @@ fun ScenariosPane(
         }
     }
 
-    // Сохранение при закрытии редактора сценариев.
+    // =====================================================
+    // SAVE WHEN EDITOR CLOSES
+    // =====================================================
+
     DisposableEffect(Unit) {
+
         onDispose {
+
             if (dirty) {
                 persist()
             }
         }
     }
 }
+
 
 // =====================================================
 // CANVAS TOOLBAR
