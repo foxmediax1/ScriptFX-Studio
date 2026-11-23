@@ -9,6 +9,12 @@ package net.foxmediax.utils.nodes
 class NodeGraphHistory(
     private val maxHistory: Int = 100
 ) {
+
+    data class Snapshot(
+        val undo: List<String>,
+        val redo: List<String>
+    )
+
     private val undoStack = ArrayDeque<String>()
     private val redoStack = ArrayDeque<String>()
 
@@ -24,22 +30,20 @@ class NodeGraphHistory(
     val redoCount: Int
         get() = redoStack.size
 
+    private val historyLimit: Int
+        get() = maxHistory.coerceAtLeast(1)
+
     /**
      * Stores the current graph state before an edit.
      */
     fun checkpoint(graph: NodeGraph) {
         val snapshot = graph.toJson()
 
-        // Do not store duplicate consecutive states.
         if (undoStack.lastOrNull() != snapshot) {
             undoStack.addLast(snapshot)
-
-            while (undoStack.size > maxHistory.coerceAtLeast(1)) {
-                undoStack.removeFirst()
-            }
+            trim(undoStack)
         }
 
-        // A new edit invalidates the redo branch.
         redoStack.clear()
     }
 
@@ -50,12 +54,11 @@ class NodeGraphHistory(
         if (undoStack.isEmpty()) return null
 
         val targetSnapshot = undoStack.lastOrNull() ?: return null
-
-        // Decode before changing either stack.
         val restored = decode(targetSnapshot) ?: return null
 
         undoStack.removeLast()
         redoStack.addLast(current.toJson())
+        trim(redoStack)
 
         return restored
     }
@@ -71,12 +74,52 @@ class NodeGraphHistory(
 
         redoStack.removeLast()
         undoStack.addLast(current.toJson())
-
-        while (undoStack.size > maxHistory.coerceAtLeast(1)) {
-            undoStack.removeFirst()
-        }
+        trim(undoStack)
 
         return restored
+    }
+
+    /**
+     * Creates a persistent snapshot of undo/redo stacks.
+     */
+    fun snapshot(): Snapshot {
+        return Snapshot(
+            undo = undoStack.toList(),
+            redo = redoStack.toList()
+        )
+    }
+
+    /**
+     * Restores persistent history.
+     *
+     * All graph snapshots are validated before changing the stacks.
+     */
+    fun restore(snapshot: Snapshot): Boolean {
+        if (
+            snapshot.undo.size > historyLimit ||
+            snapshot.redo.size > historyLimit
+        ) {
+            return false
+        }
+
+        val allSnapshots = snapshot.undo + snapshot.redo
+
+        if (allSnapshots.any { decode(it) == null }) {
+            return false
+        }
+
+        undoStack.clear()
+        redoStack.clear()
+
+        snapshot.undo.forEach {
+            undoStack.addLast(it)
+        }
+
+        snapshot.redo.forEach {
+            redoStack.addLast(it)
+        }
+
+        return true
     }
 
     /**
@@ -89,6 +132,12 @@ class NodeGraphHistory(
 
     fun clearRedo() {
         redoStack.clear()
+    }
+
+    private fun trim(stack: ArrayDeque<String>) {
+        while (stack.size > historyLimit) {
+            stack.removeFirst()
+        }
     }
 
     private fun decode(snapshot: String): NodeGraph? {
