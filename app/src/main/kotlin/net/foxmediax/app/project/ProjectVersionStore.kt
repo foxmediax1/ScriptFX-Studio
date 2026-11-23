@@ -260,6 +260,24 @@ class ProjectVersionStore(
         }
     }
 
+
+    /**
+     * Возвращает архив только после полной проверки его целостности
+     * и принадлежности указанному проекту.
+     */
+    fun getVerifiedArchive(
+        projectRoot: File,
+        versionId: String
+    ): File? {
+        if (!verifyVersion(projectRoot, versionId)) {
+            return null
+        }
+
+        return getArchive(projectRoot, versionId)
+            ?.takeIf { it.isFile }
+    }
+
+
     // =====================================================
     // READ METADATA
     // =====================================================
