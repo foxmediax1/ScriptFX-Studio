@@ -156,6 +156,8 @@ class ProjectVersionRestoreService(
 
             stagedFiles.forEach { source ->
                 val relative = source.relativeTo(staging).path
+                    .replace(File.separatorChar, '/')
+
                 val destination = resolveSafeTarget(root, relative)
 
                 destination.parentFile?.let { parentDirectory ->
@@ -381,6 +383,8 @@ class ProjectVersionRestoreService(
         backupFiles.forEach { source ->
 
             val relative = source.relativeTo(rollback).path
+                .replace(File.separatorChar, '/')
+
             val destination = resolveSafeTarget(root, relative)
 
             destination.parentFile?.let {
