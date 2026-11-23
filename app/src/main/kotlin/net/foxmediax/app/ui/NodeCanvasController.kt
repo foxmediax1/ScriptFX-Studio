@@ -2,6 +2,7 @@
 package net.foxmediax.app.ui
 
 import androidx.compose.runtime.mutableStateOf
+
 import net.foxmediax.utils.nodes.GraphNode
 import net.foxmediax.utils.nodes.NodeGraph
 import net.foxmediax.utils.nodes.NodeGraphHistory
@@ -21,7 +22,6 @@ class NodeCanvasController {
     internal var undoAction: (() -> Unit)? = null
     internal var redoAction: (() -> Unit)? = null
 
-    // Переход к узлу по ID.
     internal var focusNodeAction: ((String) -> Unit)? = null
 
     val selectedNodeId = mutableStateOf<String?>(null)
@@ -53,9 +53,6 @@ class NodeCanvasController {
         redoAction?.invoke()
     }
 
-    /**
-     * Центрирует холст на указанном узле.
-     */
     fun focusNode(nodeId: String) {
         focusNodeAction?.invoke(nodeId)
     }
@@ -75,6 +72,24 @@ class NodeCanvasController {
         history.reset(graph)
         selectedNodeId.value = null
         updateHistoryState()
+    }
+
+    /**
+     * Получает снимок Undo/Redo для сохранения на диск.
+     */
+    fun historySnapshot(): NodeGraphHistory.Snapshot {
+        return history.snapshot()
+    }
+
+    /**
+     * Восстанавливает сохранённую историю Undo/Redo.
+     */
+    fun restoreHistory(
+        snapshot: NodeGraphHistory.Snapshot
+    ): Boolean {
+        val restored = history.restore(snapshot)
+        updateHistoryState()
+        return restored
     }
 
     internal fun undoGraph(current: NodeGraph): NodeGraph? {
