@@ -1,4 +1,3 @@
-
 package net.foxmediax.app.project
 
 import java.io.File
@@ -10,7 +9,9 @@ import java.util.UUID
 import java.util.zip.ZipFile
 
 class ProjectVersionRestoreService(
-    private val versionStore: ProjectVersionStore = ProjectVersionStore()
+    private val versionStore: ProjectVersionStore = ProjectVersionStore(),
+    private val journalStore: ProjectRestoreJournalStore =
+        ProjectRestoreJournalStore()
 ) {
 
     data class RestoreResult(
@@ -43,17 +44,19 @@ class ProjectVersionRestoreService(
      *
      * Последовательность:
      * 1. Проверка архива.
-     * 2. Распаковка в staging.
-     * 3. Создание автоматической резервной версии.
-     * 4. Создание временной копии текущего состояния.
-     * 5. Замена содержимого проекта.
-     * 6. Проверка результата.
+     * 2. Создание журнала PREPARING.
+     * 3. Распаковка в staging.
+     * 4. Создание автоматической резервной версии.
+     * 5. Создание временной копии текущего состояния.
+     * 6. Замена содержимого проекта.
+     * 7. Проверка результата.
+     * 8. Удаление журнала.
      *
      * Если операция завершается ошибкой после начала замены,
      * сервис пытается вернуть прежнее состояние.
      *
      * Если аварийный откат тоже завершается ошибкой,
-     * временная папка не удаляется.
+     * временная папка и журнал не удаляются.
      */
     fun restoreVersion(
         projectRoot: File,
@@ -107,15 +110,36 @@ class ProjectVersionRestoreService(
             "rollback"
         )
 
+        /*
+         * Создаём журнал до начала операции.
+         *
+         * Если журнал создать не удалось, проект ещё не изменялся,
+         * поэтому достаточно удалить временную папку.
+         *
+         * Благодаря этому journal имеет non-null тип
+         * и его можно безопасно передавать в update().
+         */
+        var journal = try {
+            journalStore.create(
+                projectRoot = root,
+                targetVersionId = versionId,
+                workspace = workspace
+            )
+        } catch (error: Exception) {
+            workspace.deleteRecursively()
+            throw error
+        }
+
         var restoreStarted = false
         var preserveWorkspace = false
+        var preserveJournal = false
 
-        var backupVersion: ProjectVersionStore.VersionInfo? = null
+        var backupVersionId: String? = null
 
         try {
 
             // -------------------------------------------------
-            // 1. Подготовка staging
+            // 1. PREPARE STAGING
             // -------------------------------------------------
 
             if (!staging.mkdirs()) {
@@ -153,18 +177,32 @@ class ProjectVersionRestoreService(
                 )
             }
 
+            // Архив полностью распакован и проверен.
+            journal = journalStore.update(
+                journal,
+                ProjectRestoreJournalStore.State.STAGED
+            )
+
             // -------------------------------------------------
-            // 2. Автоматическая резервная версия
+            // 2. AUTOMATIC BACKUP
             // -------------------------------------------------
 
-            backupVersion = versionStore.createVersion(
+            val backupVersion = versionStore.createVersion(
                 projectRoot = root,
                 name = "Автоматическая резервная копия",
                 comment = "Создана перед восстановлением версии $versionId"
             )
 
+            backupVersionId = backupVersion.id
+
+            journal = journalStore.update(
+                journal,
+                state = ProjectRestoreJournalStore.State.BACKUP_CREATED,
+                backupVersionId = backupVersion.id
+            )
+
             // -------------------------------------------------
-            // 3. Подготовка rollback
+            // 3. PREPARE ROLLBACK
             // -------------------------------------------------
 
             if (!rollback.mkdirs()) {
@@ -240,15 +278,24 @@ class ProjectVersionRestoreService(
             }
 
             // -------------------------------------------------
-            // 4. Начинаем изменять проект
+            // 4. BEGIN REPLACEMENT
             // -------------------------------------------------
+
+            /*
+             * Сначала записываем состояние REPLACING.
+             * Только после успешной записи разрешаем изменение проекта.
+             */
+            journal = journalStore.update(
+                journal,
+                ProjectRestoreJournalStore.State.REPLACING
+            )
 
             restoreStarted = true
 
             removeManagedContents(root)
 
             // -------------------------------------------------
-            // 5. Восстанавливаем структуру директорий
+            // 5. RESTORE DIRECTORIES
             // -------------------------------------------------
 
             stagedDirectories.forEach { directory ->
@@ -270,7 +317,7 @@ class ProjectVersionRestoreService(
             }
 
             // -------------------------------------------------
-            // 6. Восстанавливаем файлы
+            // 6. RESTORE FILES
             // -------------------------------------------------
 
             stagedFiles.forEach { source ->
@@ -314,7 +361,7 @@ class ProjectVersionRestoreService(
             }
 
             // -------------------------------------------------
-            // 7. Проверяем итоговые файлы
+            // 7. VERIFY RESTORED FILES
             // -------------------------------------------------
 
             verifyRestoredFiles(
@@ -323,7 +370,7 @@ class ProjectVersionRestoreService(
             )
 
             // -------------------------------------------------
-            // 8. Проверяем восстановленные директории
+            // 8. VERIFY RESTORED DIRECTORIES
             // -------------------------------------------------
 
             stagedDirectories.forEach { directory ->
@@ -345,6 +392,28 @@ class ProjectVersionRestoreService(
                 }
             }
 
+            // -------------------------------------------------
+            // 9. COMPLETED
+            // -------------------------------------------------
+
+            journal = journalStore.update(
+                journal,
+                ProjectRestoreJournalStore.State.COMPLETED
+            )
+
+            /*
+             * Удаление журнала — отдельная операция.
+             *
+             * Если она не удастся, восстановленный проект
+             * не должен автоматически откатываться.
+             *
+             * В этом случае журнал COMPLETED останется на диске
+             * для последующей очистки при запуске Studio.
+             */
+            runCatching {
+                journalStore.delete(root)
+            }
+
             return RestoreResult(
                 restoredFiles = restoredFiles,
                 backupVersion = backupVersion
@@ -353,10 +422,24 @@ class ProjectVersionRestoreService(
         } catch (error: Exception) {
 
             // -------------------------------------------------
-            // АВАРИЙНЫЙ ОТКАТ
+            // EMERGENCY ROLLBACK
             // -------------------------------------------------
 
             if (restoreStarted) {
+
+                /*
+                 * Фиксируем необходимость аварийного отката.
+                 * Если запись журнала не удалась, всё равно
+                 * продолжаем попытку вернуть проект.
+                 */
+                try {
+                    journal = journalStore.update(
+                        journal,
+                        ProjectRestoreJournalStore.State.ROLLBACK_REQUIRED
+                    )
+                } catch (journalError: Exception) {
+                    error.addSuppressed(journalError)
+                }
 
                 try {
 
@@ -368,13 +451,25 @@ class ProjectVersionRestoreService(
                 } catch (rollbackError: Exception) {
 
                     preserveWorkspace = true
+                    preserveJournal = true
+
+                    // Сохраняем информацию о неудачном откате.
+                    try {
+                        journal = journalStore.update(
+                            journal,
+                            ProjectRestoreJournalStore.State.ROLLBACK_FAILED
+                        )
+                    } catch (journalError: Exception) {
+                        rollbackError.addSuppressed(journalError)
+                    }
 
                     val recoveryError = IOException(
-                        "Восстановление и аварийный откат завершились ошибкой. " +
-                                "Временные данные сохранены в: " +
+                        "Восстановление и аварийный откат завершились " +
+                                "ошибкой. Временные данные сохранены в: " +
                                 "${workspace.absolutePath}. " +
                                 "Резервная версия: " +
-                                "${backupVersion?.id ?: "не создана"}.",
+                                "${backupVersionId ?: "не создана"}. " +
+                                "Журнал восстановления сохранён.",
                         error
                     )
 
@@ -391,11 +486,28 @@ class ProjectVersionRestoreService(
         } finally {
 
             /*
-             * Если аварийный откат не удался,
-             * временная папка остаётся на диске.
+             * При неудачном rollback сохраняем workspace.
+             *
+             * Он содержит staging и rollback, необходимые
+             * для ручного или автоматического восстановления.
              */
             if (!preserveWorkspace) {
                 workspace.deleteRecursively()
+            }
+
+            /*
+             * Если rollback завершился успешно либо ошибка возникла
+             * до начала замены — журнал удаляется.
+             *
+             * Если rollback не удался — журнал сохраняется.
+             *
+             * Если проект успешно восстановлен, но удаление журнала
+             * ранее не удалось, повторяем удаление здесь.
+             */
+            if (!preserveJournal) {
+                runCatching {
+                    journalStore.delete(root)
+                }
             }
         }
     }
@@ -507,7 +619,7 @@ class ProjectVersionRestoreService(
                 )
 
                 // -------------------------------------------------
-                // Директория
+                // DIRECTORY
                 // -------------------------------------------------
 
                 if (entry.isDirectory) {
@@ -527,7 +639,7 @@ class ProjectVersionRestoreService(
                 }
 
                 // -------------------------------------------------
-                // Файл
+                // FILE
                 // -------------------------------------------------
 
                 fileCount++
@@ -638,7 +750,11 @@ class ProjectVersionRestoreService(
 
                 if (child.isDirectory) {
 
-                    if (child.name in EXCLUDED_DIRS) {
+                    if (
+                        EXCLUDED_DIRS.any {
+                            it.equals(child.name, ignoreCase = true)
+                        }
+                    ) {
                         return@forEach
                     }
 
@@ -688,7 +804,11 @@ class ProjectVersionRestoreService(
 
                 if (child.isDirectory) {
 
-                    if (child.name in EXCLUDED_DIRS) {
+                    if (
+                        EXCLUDED_DIRS.any {
+                            it.equals(child.name, ignoreCase = true)
+                        }
+                    ) {
                         return@forEach
                     }
 
@@ -794,7 +914,11 @@ class ProjectVersionRestoreService(
 
             if (!child.isDirectory) {
                 false
-            } else if (child.name in EXCLUDED_DIRS) {
+            } else if (
+                EXCLUDED_DIRS.any {
+                    it.equals(child.name, ignoreCase = true)
+                }
+            ) {
                 true
             } else {
                 containsExcludedDirectory(child)
