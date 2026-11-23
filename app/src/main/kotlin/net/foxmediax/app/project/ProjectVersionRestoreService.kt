@@ -19,6 +19,19 @@ class ProjectVersionRestoreService(
         val backupVersion: ProjectVersionStore.VersionInfo
     )
 
+    enum class RecoveryAction {
+        DISCARDED_BEFORE_REPLACEMENT,
+        RESTORED_PREVIOUS_STATE,
+        CLEANED_COMPLETED_OPERATION
+    }
+
+    data class RecoveryResult(
+        val action: RecoveryAction,
+        val targetVersionId: String,
+        val backupVersionId: String?,
+        val message: String
+    )
+
     private companion object {
         const val MAX_FILES = 100_000
         const val MAX_ENTRIES = 200_000
@@ -509,6 +522,318 @@ class ProjectVersionRestoreService(
                     journalStore.delete(root)
                 }
             }
+        }
+    }
+
+    // =====================================================
+// INTERRUPTED RESTORE RECOVERY
+// =====================================================
+
+    /**
+     * Проверяет журнал предыдущей операции восстановления
+     * и устраняет последствия аварийного завершения Studio.
+     *
+     * Вызывается перед открытием проекта.
+     *
+     * Возвращает null, если незавершённой операции нет.
+     */
+    fun recoverInterruptedRestore(
+        projectRoot: File
+    ): RecoveryResult? {
+
+        val originalPath = projectRoot.absoluteFile
+            .toPath()
+            .normalize()
+
+        if (Files.isSymbolicLink(originalPath)) {
+            throw IOException(
+                "Папка проекта является символической ссылкой."
+            )
+        }
+
+        val root = projectRoot.canonicalFile
+
+        if (!root.isDirectory) {
+            throw IOException(
+                "Папка проекта не существует."
+            )
+        }
+
+        val journal = journalStore.read(root) ?: return null
+
+        val workspace = resolveRecoveryWorkspace(
+            root,
+            journal
+        )
+
+        return when (journal.state) {
+
+            ProjectRestoreJournalStore.State.PREPARING,
+            ProjectRestoreJournalStore.State.STAGED,
+            ProjectRestoreJournalStore.State.BACKUP_CREATED -> {
+
+                // Изменение проекта ещё не начиналось.
+                deleteRecoveryWorkspace(workspace)
+                journalStore.delete(root)
+
+                RecoveryResult(
+                    action = RecoveryAction.DISCARDED_BEFORE_REPLACEMENT,
+                    targetVersionId = journal.targetVersionId,
+                    backupVersionId = journal.backupVersionId,
+                    message = buildString {
+                        append(
+                            "Обнаружена незавершённая операция восстановления."
+                        )
+                        appendLine()
+                        append(
+                            "Изменение проекта ещё не начиналось. " +
+                                    "Временные данные удалены."
+                        )
+
+                        journal.backupVersionId?.let {
+                            appendLine()
+                            append(
+                                "Автоматическая резервная версия сохранена: $it"
+                            )
+                        }
+                    }
+                )
+            }
+
+            ProjectRestoreJournalStore.State.COMPLETED -> {
+
+                // Восстановление завершилось успешно,
+                // но Studio не успела удалить временные данные.
+                deleteRecoveryWorkspace(workspace)
+                journalStore.delete(root)
+
+                RecoveryResult(
+                    action = RecoveryAction.CLEANED_COMPLETED_OPERATION,
+                    targetVersionId = journal.targetVersionId,
+                    backupVersionId = journal.backupVersionId,
+                    message =
+                        "Предыдущее восстановление версии " +
+                                "${journal.targetVersionId} завершилось успешно. " +
+                                "Остатки операции очищены."
+                )
+            }
+
+            ProjectRestoreJournalStore.State.REPLACING,
+            ProjectRestoreJournalStore.State.ROLLBACK_REQUIRED,
+            ProjectRestoreJournalStore.State.ROLLBACK_FAILED -> {
+
+                recoverFromAutomaticBackup(
+                    root = root,
+                    workspace = workspace,
+                    journal = journal
+                )
+            }
+        }
+    }
+
+    /**
+     * Возвращает проект к состоянию до прерванного восстановления.
+     *
+     * Источником восстановления выступает автоматическая версия,
+     * созданная до начала замены файлов проекта.
+     */
+    private fun recoverFromAutomaticBackup(
+        root: File,
+        workspace: File,
+        journal: ProjectRestoreJournalStore.Journal
+    ): RecoveryResult {
+
+        var currentJournal = journal
+
+        val backupVersionId = journal.backupVersionId
+            ?: throw IOException(
+                "В журнале отсутствует ID автоматической резервной версии. " +
+                        "Автоматическое восстановление невозможно. " +
+                        "Журнал сохранён."
+            )
+
+        try {
+
+            // -------------------------------------------------
+            // 1. VERIFY AUTOMATIC BACKUP
+            // -------------------------------------------------
+
+            val backupArchive = versionStore.getVerifiedArchive(
+                root,
+                backupVersionId
+            ) ?: throw IOException(
+                "Автоматическая резервная версия $backupVersionId " +
+                        "не найдена или повреждена."
+            )
+
+            // -------------------------------------------------
+            // 2. PREPARE RECOVERY WORKSPACE
+            // -------------------------------------------------
+
+            if (!workspace.exists() && !workspace.mkdirs()) {
+                throw IOException(
+                    "Не удалось создать временную папку восстановления."
+                )
+            }
+
+            if (Files.isSymbolicLink(workspace.toPath())) {
+                throw IOException(
+                    "Временная папка восстановления является символической ссылкой."
+                )
+            }
+
+            if (!workspace.isDirectory) {
+                throw IOException(
+                    "Временная папка восстановления не является директорией."
+                )
+            }
+
+            // -------------------------------------------------
+            // 3. PREPARE RECOVERY STAGING
+            // -------------------------------------------------
+
+            val recoveryStaging = File(
+                workspace,
+                "recovery-staging"
+            )
+
+            if (Files.isSymbolicLink(recoveryStaging.toPath())) {
+                throw IOException(
+                    "Recovery staging является символической ссылкой."
+                )
+            }
+
+            if (recoveryStaging.exists()) {
+
+                if (!recoveryStaging.isDirectory) {
+                    throw IOException(
+                        "Recovery staging не является директорией."
+                    )
+                }
+
+                if (
+                    !recoveryStaging.deleteRecursively() &&
+                    recoveryStaging.exists()
+                ) {
+                    throw IOException(
+                        "Не удалось очистить предыдущую Recovery staging."
+                    )
+                }
+            }
+
+            if (!recoveryStaging.mkdirs()) {
+                throw IOException(
+                    "Не удалось создать Recovery staging."
+                )
+            }
+
+            // -------------------------------------------------
+            // 4. EXTRACT VERIFIED BACKUP
+            // -------------------------------------------------
+
+            val restoredFiles = extractArchive(
+                archive = backupArchive,
+                destination = recoveryStaging
+            )
+
+            val recoveryFiles = collectManagedFiles(
+                recoveryStaging
+            )
+
+            val recoveryDirectories = collectManagedDirectories(
+                recoveryStaging
+            )
+
+            if (recoveryFiles.size != restoredFiles) {
+                throw IOException(
+                    "Количество файлов резервной версии не совпадает."
+                )
+            }
+
+            if (recoveryFiles.size > MAX_FILES) {
+                throw IOException(
+                    "В резервной версии слишком много файлов."
+                )
+            }
+
+            if (
+                recoveryFiles.size + recoveryDirectories.size >
+                MAX_ENTRIES
+            ) {
+                throw IOException(
+                    "В резервной версии слишком много элементов."
+                )
+            }
+
+            // -------------------------------------------------
+            // 5. MARK ROLLBACK REQUIRED
+            // -------------------------------------------------
+
+            currentJournal = journalStore.update(
+                currentJournal,
+                ProjectRestoreJournalStore.State.ROLLBACK_REQUIRED
+            )
+
+            // -------------------------------------------------
+            // 6. RESTORE PREVIOUS PROJECT STATE
+            // -------------------------------------------------
+
+            restoreRollback(
+                root = root,
+                rollback = recoveryStaging
+            )
+
+            // -------------------------------------------------
+            // 7. CLEANUP
+            // -------------------------------------------------
+
+            /*
+             * Сначала удаляем временную папку, затем журнал.
+             *
+             * Если Studio завершится между этими операциями,
+             * повторный запуск сможет снова извлечь резервную
+             * версию по backupVersionId.
+             */
+            deleteRecoveryWorkspace(workspace)
+            journalStore.delete(root)
+
+            return RecoveryResult(
+                action = RecoveryAction.RESTORED_PREVIOUS_STATE,
+                targetVersionId = journal.targetVersionId,
+                backupVersionId = backupVersionId,
+                message =
+                    "Обнаружено прерванное восстановление версии " +
+                            "${journal.targetVersionId}. " +
+                            "Проект автоматически возвращён к состоянию " +
+                            "до начала операции. " +
+                            "Резервная версия: $backupVersionId."
+            )
+
+        } catch (error: Exception) {
+
+            /*
+             * Не удаляем workspace и журнал.
+             * Они нужны для следующей попытки восстановления
+             * и возможной ручной диагностики.
+             */
+            try {
+                currentJournal = journalStore.update(
+                    currentJournal,
+                    ProjectRestoreJournalStore.State.ROLLBACK_FAILED
+                )
+            } catch (journalError: Exception) {
+                error.addSuppressed(journalError)
+            }
+
+            throw IOException(
+                "Не удалось автоматически восстановить проект " +
+                        "после прерванной операции. " +
+                        "Проект нельзя безопасно открыть. " +
+                        "Резервная версия: $backupVersionId. " +
+                        "Временные данные: ${workspace.absolutePath}. " +
+                        "Журнал сохранён для повторной попытки.",
+                error
+            )
         }
     }
 
@@ -1066,6 +1391,140 @@ class ProjectVersionRestoreService(
                     "Не удалось вернуть папку: $relative"
                 )
             }
+        }
+    }
+
+    // =====================================================
+// RECOVERY WORKSPACE VALIDATION
+// =====================================================
+
+    /**
+     * Проверяет, что workspace действительно является
+     * временной папкой восстановления данного проекта.
+     *
+     * Журнал не может указывать на произвольную папку
+     * или на каталог за пределами проекта.
+     */
+    private fun resolveRecoveryWorkspace(
+        root: File,
+        journal: ProjectRestoreJournalStore.Journal
+    ): File {
+
+        val storedPath = File(
+            journal.workspacePath
+        ).toPath()
+
+        if (!storedPath.isAbsolute) {
+            throw IOException(
+                "Путь Recovery Workspace не является абсолютным."
+            )
+        }
+
+        val normalizedPath = storedPath.normalize()
+
+        val projectParent = root.parentFile?.canonicalFile
+            ?: throw IOException(
+                "Не удалось определить родительский каталог проекта."
+            )
+
+        val workspaceParent = normalizedPath.parent
+            ?.toFile()
+            ?.canonicalFile
+            ?: throw IOException(
+                "Некорректный путь Recovery Workspace."
+            )
+
+        if (workspaceParent != projectParent) {
+            throw IOException(
+                "Recovery Workspace находится вне разрешённого каталога."
+            )
+        }
+
+        val workspaceName = normalizedPath.fileName
+            ?.toString()
+            ?: throw IOException(
+                "Некорректное имя Recovery Workspace."
+            )
+
+        val prefix = ".scriptfx-restore-"
+
+        if (!workspaceName.startsWith(prefix)) {
+            throw IOException(
+                "Некорректное имя временной папки восстановления."
+            )
+        }
+
+        val uuidText = workspaceName.removePrefix(prefix)
+
+        val parsedUuid = try {
+            UUID.fromString(uuidText)
+        } catch (error: IllegalArgumentException) {
+            throw IOException(
+                "Некорректный идентификатор Recovery Workspace.",
+                error
+            )
+        }
+
+        if (!parsedUuid.toString().equals(uuidText, ignoreCase = true)) {
+            throw IOException(
+                "Некорректный формат идентификатора Recovery Workspace."
+            )
+        }
+
+        val workspace = normalizedPath.toFile()
+
+        if (Files.isSymbolicLink(workspace.toPath())) {
+            throw IOException(
+                "Recovery Workspace является символической ссылкой."
+            )
+        }
+
+        if (
+            workspace.exists() &&
+            workspace.canonicalFile.parentFile != projectParent
+        ) {
+            throw IOException(
+                "Фактический путь Recovery Workspace не совпадает с ожидаемым."
+            )
+        }
+
+        return workspace
+    }
+
+// =====================================================
+// RECOVERY WORKSPACE CLEANUP
+// =====================================================
+
+    /**
+     * Удаляет только проверенную временную папку восстановления.
+     */
+    private fun deleteRecoveryWorkspace(
+        workspace: File
+    ) {
+
+        if (Files.isSymbolicLink(workspace.toPath())) {
+            throw IOException(
+                "Нельзя удалить Recovery Workspace: обнаружена символическая ссылка."
+            )
+        }
+
+        if (!workspace.exists()) {
+            return
+        }
+
+        if (!workspace.isDirectory) {
+            throw IOException(
+                "Recovery Workspace не является директорией."
+            )
+        }
+
+        if (
+            !workspace.deleteRecursively() &&
+            workspace.exists()
+        ) {
+            throw IOException(
+                "Не удалось удалить Recovery Workspace: ${workspace.path}"
+            )
         }
     }
 
