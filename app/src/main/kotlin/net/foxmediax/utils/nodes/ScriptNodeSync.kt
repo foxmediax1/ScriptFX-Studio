@@ -1,3 +1,4 @@
+
 package net.foxmediax.utils.nodes
 
 object ScriptNodeSync {
@@ -140,7 +141,6 @@ object ScriptNodeSync {
                         output.append(prefix)
                             .append("stopscript\n")
 
-                        // После END сценарий заканчивается.
                         break
                     }
 
@@ -267,6 +267,18 @@ object ScriptNodeSync {
 
         fun parseSimple(line: String): GraphNode? {
             return when {
+
+                // Самостоятельная команда startscript
+                // обозначает входную ноду сценария.
+                line == "startscript" -> {
+                    GraphNode(
+                        id = newId("start"),
+                        kind = NodeKind.START,
+                        title = "Начало скрипта"
+                    )
+                }
+
+                // startscript с аргументом — это CALL.
                 line.startsWith("startscript ") -> {
                     callCounter++
 
@@ -278,19 +290,6 @@ object ScriptNodeSync {
                             "target" to unquoteArgument(
                                 line.removePrefix("startscript ")
                             )
-                        )
-                    )
-                }
-
-                line.startsWith("startscript ") -> {
-                    callCounter++
-
-                    GraphNode(
-                        id = newId("call$callCounter"),
-                        kind = NodeKind.CALL,
-                        title = "Запустить сценарий",
-                        params = mapOf(
-                            "target" to line.removePrefix("startscript ").trim()
                         )
                     )
                 }
@@ -628,8 +627,6 @@ object ScriptNodeSync {
             "1000"
         }
 
-        // Обычное число параметра ms превращаем
-        // в формат Durations runtime: 1000.ms.
         return if (numericDuration.matches(value)) {
             "$value.ms"
         } else {
