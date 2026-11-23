@@ -35,6 +35,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import kotlinx.coroutines.delay
 import net.foxmediax.app.project.GraphRecoveryStore
 import java.util.Date
+import net.foxmediax.app.project.GraphHistoryStore
+import net.foxmediax.utils.nodes.NodeGraphHistory
 
 enum class CanvasMode {
     NODES,
@@ -547,6 +549,18 @@ fun ScenariosPane(
     val canRedoText by textHistory.canRedo
 
     // =====================================================
+// PERSISTENT GRAPH HISTORY
+// =====================================================
+
+    val graphHistoryStore = remember(projectRoot) {
+        GraphHistoryStore()
+    }
+
+    var pendingGraphHistory by remember {
+        mutableStateOf<NodeGraphHistory.Snapshot?>(null)
+    }
+
+    // =====================================================
     // GRAPH CALLBACKS
     // =====================================================
 
@@ -592,6 +606,7 @@ fun ScenariosPane(
     // =====================================================
     // SAVE SCENARIO
     // =====================================================
+
 
     fun persist(): Boolean {
 
@@ -649,14 +664,13 @@ fun ScenariosPane(
                 }
             }
 
-            // Обновляем базовую версию файлов после сохранения.
+            // Обновляем контрольную сумму сохранённого состояния.
             graphBaselineFingerprint = graphRecoveryStore.fingerprint(
                 projectRoot,
                 file
             )
 
-// Резервная копия больше не нужна,
-// потому что сценарий успешно сохранён.
+            // Сохранённый граф больше не нуждается в аварийном восстановлении.
             runCatching {
                 graphRecoveryStore.clear(
                     projectRoot,
@@ -667,6 +681,42 @@ fun ScenariosPane(
                     "ScriptFX Studio: не удалось очистить резервную копию: " +
                             it.message
                 )
+            }
+
+            // Сохраняем постоянную историю нодового редактора.
+            if (mode == CanvasMode.NODES) {
+
+                runCatching {
+
+                    graphHistoryStore.save(
+                        projectRoot = projectRoot,
+                        scenarioFile = file,
+                        baselineFingerprint = graphBaselineFingerprint,
+                        currentGraphJson = graph.toJson(),
+                        snapshot = canvasController.historySnapshot()
+                    )
+
+                }.onFailure {
+                    println(
+                        "ScriptFX Studio: не удалось сохранить историю графа: " +
+                                it.message
+                    )
+                }
+
+            } else {
+
+                // Текстовый режим больше не использует старую историю графа.
+                runCatching {
+                    graphHistoryStore.clear(
+                        projectRoot,
+                        file
+                    )
+                }.onFailure {
+                    println(
+                        "ScriptFX Studio: не удалось очистить историю графа: " +
+                                it.message
+                    )
+                }
             }
 
             dirty = false
@@ -686,9 +736,7 @@ fun ScenariosPane(
         }
     }
 
-    // =====================================================
-    // OPEN SCENARIO
-    // =====================================================
+
 
     fun openFile(file: File) {
 
@@ -701,6 +749,7 @@ fun ScenariosPane(
         showGraphRecoveryDialog = false
         pendingGraphRecovery = null
         pendingRecoveryFile = null
+        pendingGraphHistory = null
 
         val previousFile = currentFile
 
@@ -709,6 +758,7 @@ fun ScenariosPane(
             previousFile != null &&
             mode == CanvasMode.TEXT
         ) {
+
             runCatching {
 
                 textHistoryStore.save(
@@ -754,8 +804,7 @@ fun ScenariosPane(
 
             }.getOrNull()
 
-            // Проверяем, есть ли сохранённая история.
-            val restoredHistory = textHistoryStore.load(
+            val restoredTextHistory = textHistoryStore.load(
                 projectRoot = projectRoot,
                 scenarioFile = file,
                 expectedBaselineText = strippedText
@@ -764,21 +813,23 @@ fun ScenariosPane(
             currentFile = file
             graphBaselineFingerprint = loadedFingerprint
 
-            graph = savedGraph
+            val loadedGraph = savedGraph
                 ?: ScriptNodeSync.textToGraph(fileText)
 
-            canvasController.resetHistory(graph)
+            graph = loadedGraph
+
+            canvasController.resetHistory(loadedGraph)
 
             graphRevision++
 
-            if (restoredHistory != null) {
+            if (restoredTextHistory != null) {
 
-                // Восстанавливаем текст и историю.
+                // Восстанавливаем текстовый черновик.
                 textFieldValue = textHistory.restore(
-                    restoredHistory.snapshot
+                    restoredTextHistory.snapshot
                 )
 
-                textModeBaseline = restoredHistory.baselineText
+                textModeBaseline = restoredTextHistory.baselineText
 
                 mode = CanvasMode.TEXT
 
@@ -786,7 +837,6 @@ fun ScenariosPane(
 
             } else {
 
-                // Открываем сценарий как обычно.
                 textFieldValue = TextFieldValue(
                     strippedText
                 )
@@ -805,8 +855,11 @@ fun ScenariosPane(
                 }
 
                 dirty = false
+            }
 
-                // Проверяем наличие резервной копии нодового графа.
+            // Историю графа восстанавливаем только в нодовом режиме.
+            if (mode == CanvasMode.NODES) {
+
                 val recovery = graphRecoveryStore.load(
                     projectRoot = projectRoot,
                     scenarioFile = file,
@@ -814,9 +867,42 @@ fun ScenariosPane(
                 )
 
                 if (recovery != null) {
+
+                    // Резервная копия и история должны относиться
+                    // к одному и тому же текущему графу.
                     pendingGraphRecovery = recovery
+
+                    pendingGraphHistory = graphHistoryStore.load(
+                        projectRoot = projectRoot,
+                        scenarioFile = file,
+                        expectedBaselineFingerprint = loadedFingerprint,
+                        expectedGraphJson = recovery.graph.toJson()
+                    )
+
                     pendingRecoveryFile = file
                     showGraphRecoveryDialog = true
+
+                } else {
+
+                    // Если аварийной копии нет, восстанавливаем
+                    // историю относительно обычного сохранённого графа.
+                    val savedHistory = graphHistoryStore.load(
+                        projectRoot = projectRoot,
+                        scenarioFile = file,
+                        expectedBaselineFingerprint = loadedFingerprint,
+                        expectedGraphJson = loadedGraph.toJson()
+                    )
+
+                    if (savedHistory != null) {
+
+                        val restored = canvasController.restoreHistory(
+                            savedHistory
+                        )
+
+                        if (!restored) {
+                            canvasController.resetHistory(loadedGraph)
+                        }
+                    }
                 }
             }
 
@@ -828,6 +914,7 @@ fun ScenariosPane(
             )
         }
     }
+
 
     // =====================================================
     // INITIAL SCENARIO
@@ -904,8 +991,9 @@ fun ScenariosPane(
         }
     }
 
-    // =====================================================
-// AUTOMATIC GRAPH RECOVERY
+
+// =====================================================
+// AUTOMATIC GRAPH RECOVERY AND HISTORY
 // =====================================================
 
     LaunchedEffect(
@@ -927,9 +1015,11 @@ fun ScenariosPane(
             return@LaunchedEffect
         }
 
-        // Создаём снимок до задержки.
-        // Это исключает чтение уже изменённого графа из фоновой задачи.
+        // Снимки фиксируются до задержки.
         val graphSnapshot = graph.toJson()
+
+        val historySnapshot = canvasController.historySnapshot()
+
         val baseline = graphBaselineFingerprint
 
         delay(700)
@@ -938,22 +1028,33 @@ fun ScenariosPane(
 
             withContext(Dispatchers.IO) {
 
+                // Аварийная копия текущего графа.
                 graphRecoveryStore.save(
                     projectRoot = projectRoot,
                     scenarioFile = file,
                     baselineFingerprint = baseline,
                     graphJson = graphSnapshot
                 )
+
+                // История Undo/Redo именно для этого графа.
+                graphHistoryStore.save(
+                    projectRoot = projectRoot,
+                    scenarioFile = file,
+                    baselineFingerprint = baseline,
+                    currentGraphJson = graphSnapshot,
+                    snapshot = historySnapshot
+                )
             }
 
         }.onFailure { error ->
 
             println(
-                "ScriptFX Studio: не удалось сохранить резервную копию графа: " +
+                "ScriptFX Studio: не удалось сохранить граф и его историю: " +
                         error.message
             )
         }
     }
+
 
     // =====================================================
     // PERSIST TEXT EDITOR HISTORY
@@ -1417,6 +1518,7 @@ fun ScenariosPane(
                                     textFieldValue.text != textModeBaseline
                                 ) {
 
+
                                     val parsedGraph =
                                         ScriptNodeSync.textToGraph(
                                             textFieldValue.text
@@ -1431,6 +1533,31 @@ fun ScenariosPane(
                                     graphRevision++
 
                                     dirty = true
+
+                                } else {
+
+                                    // Если текст не менялся, восстанавливаем историю
+                                    // ранее сохранённого нодового графа.
+                                    currentFile?.let { file ->
+
+                                        val savedHistory = graphHistoryStore.load(
+                                            projectRoot = projectRoot,
+                                            scenarioFile = file,
+                                            expectedBaselineFingerprint = graphBaselineFingerprint,
+                                            expectedGraphJson = graph.toJson()
+                                        )
+
+                                        if (savedHistory != null) {
+
+                                            val restored = canvasController.restoreHistory(
+                                                savedHistory
+                                            )
+
+                                            if (!restored) {
+                                                canvasController.resetHistory(graph)
+                                            }
+                                        }
+                                    }
                                 }
 
                                 textHistory.reset()
@@ -1628,12 +1755,27 @@ fun ScenariosPane(
                                 recovery.graph
                             )
 
+                            // Восстанавливаем Undo/Redo для аварийной копии.
+                            pendingGraphHistory?.let { history ->
+
+                                val restored = canvasController.restoreHistory(
+                                    history
+                                )
+
+                                if (!restored) {
+                                    canvasController.resetHistory(
+                                        recovery.graph
+                                    )
+                                }
+                            }
+
                             graphRevision++
 
                             mode = CanvasMode.NODES
                             dirty = true
 
                             pendingGraphRecovery = null
+                            pendingGraphHistory = null
                             pendingRecoveryFile = null
                             showGraphRecoveryDialog = false
                         }
@@ -1648,18 +1790,19 @@ fun ScenariosPane(
                         onClick = {
 
                             runCatching {
-                                graphRecoveryStore.clear(
+                                graphHistoryStore.clear(
                                     projectRoot,
                                     recoveryFile
                                 )
                             }.onFailure {
                                 println(
-                                    "ScriptFX Studio: не удалось удалить резервную копию: " +
+                                    "ScriptFX Studio: не удалось удалить историю графа: " +
                                             it.message
                                 )
                             }
 
                             pendingGraphRecovery = null
+                            pendingGraphHistory = null
                             pendingRecoveryFile = null
                             showGraphRecoveryDialog = false
                         }
