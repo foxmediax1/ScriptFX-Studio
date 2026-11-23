@@ -30,6 +30,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import net.foxmediax.app.project.ExportPreviewService
 
 enum class CanvasMode {
     NODES,
@@ -1125,51 +1126,60 @@ private fun CanvasToolbar(
 // =====================================================
 // SETTINGS PANE
 // =====================================================
-
 @Composable
 fun SettingsPane(
     projectRoot: File,
     onOpenScenarioIssue: (String, String?) -> Unit = { _, _ -> }
 ) {
+
     val manifestFile = File(
         projectRoot,
         "scriptfx.project.json"
     )
 
-    var exportPath by remember {
+    // =====================================================
+    // EXPORT PATH
+    // =====================================================
+
+    var exportPath by remember(projectRoot) {
         mutableStateOf(
             runCatching {
                 val content = manifestFile.readText()
 
                 Regex(
-                    """"exportPath"\s*:\s*"([^"]*)""""
-                ).find(content)?.groupValues?.get(1)
+                    "\"exportPath\"\\s*:\\s*\"([^\"]*)\""
+                ).find(content)?.groupValues?.get(1) ?: ""
 
             }.getOrNull() ?: ""
         )
     }
 
-    var lastResult by remember {
-        mutableStateOf<ExportService.Result?>(null)
+    fun persistExportPath(path: String) {
+
+        if (!manifestFile.isFile) return
+
+        val content = manifestFile.readText()
+
+        val escapedPath = path
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+
+        val regex = Regex(
+            "\"exportPath\"\\s*:\\s*\"[^\"]*\""
+        )
+
+        val updated = regex.replace(content) {
+            "\"exportPath\":\"$escapedPath\""
+        }
+
+        manifestFile.writeText(updated)
     }
+
+    // =====================================================
+    // STATE
+    // =====================================================
 
     var busy by remember {
-        mutableStateOf(false)
-    }
-
-    var showValidationDetails by remember {
-        mutableStateOf(false)
-    }
-
-    var validationFilter by remember {
-        mutableStateOf<GraphIssueSeverity?>(null)
-    }
-
-    var validationReport by remember {
-        mutableStateOf<ExportService.ValidationReport?>(null)
-    }
-
-    var showValidationDialog by remember {
         mutableStateOf(false)
     }
 
@@ -1177,50 +1187,203 @@ fun SettingsPane(
         mutableStateOf(false)
     }
 
+    var previewing by remember {
+        mutableStateOf(false)
+    }
+
     var validationError by remember {
         mutableStateOf<String?>(null)
     }
 
-    val validationScope = rememberCoroutineScope()
-
-    fun persistExportPath(path: String) {
-        if (!manifestFile.isFile) return
-
-        val updated = manifestFile.readText().replace(
-            Regex(
-                """"exportPath"\s*:\s*"[^"]*""""
-            ),
-            """"exportPath":"${path.replace("\\", "\\\\")}""""
-        )
-
-        manifestFile.writeText(updated)
+    var lastResult by remember {
+        mutableStateOf<ExportService.Result?>(null)
     }
 
+    var validationReport by remember {
+        mutableStateOf<ExportService.ValidationReport?>(null)
+    }
+
+    var exportPreview by remember {
+        mutableStateOf<ExportPreviewService.Plan?>(null)
+    }
+
+    var showValidationDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var showExportPreview by remember {
+        mutableStateOf(false)
+    }
+
+    val scope = rememberCoroutineScope()
+
+    // =====================================================
+    // VALIDATE PROJECT
+    // =====================================================
+
+    fun validateProject() {
+
+        scope.launch {
+
+            validating = true
+            validationError = null
+
+            try {
+
+                val target = exportPath
+                    .takeIf { it.isNotBlank() }
+                    ?.let(::File)
+
+                validationReport = withContext(Dispatchers.IO) {
+
+                    ExportService.validateProject(
+                        projectRoot = projectRoot,
+                        targetDir = target
+                    )
+                }
+
+                showValidationDialog = true
+
+            } catch (e: Exception) {
+
+                validationError = e.message
+                    ?: "Не удалось проверить проект."
+
+            } finally {
+                validating = false
+            }
+        }
+    }
+
+    // =====================================================
+    // PREPARE EXPORT PREVIEW
+    // =====================================================
+
+    fun prepareExportPreview() {
+
+        if (exportPath.isBlank()) {
+            validationError = "Сначала укажи папку Minecraft."
+            return
+        }
+
+        scope.launch {
+
+            previewing = true
+            validationError = null
+
+            try {
+
+                val target = File(exportPath.trim())
+
+                exportPreview = withContext(Dispatchers.IO) {
+
+                    ExportPreviewService.createPlan(
+                        projectRoot = projectRoot,
+                        targetDir = target
+                    )
+                }
+
+                showExportPreview = true
+
+            } catch (e: Exception) {
+
+                validationError = e.message
+                    ?: "Не удалось подготовить предпросмотр."
+
+            } finally {
+                previewing = false
+            }
+        }
+    }
+
+    // =====================================================
+    // PERFORM EXPORT
+    // =====================================================
+
+    fun performExport() {
+
+        if (exportPath.isBlank()) {
+            validationError = "Не указана папка Minecraft."
+            return
+        }
+
+        scope.launch {
+
+            busy = true
+            validationError = null
+
+            try {
+
+                val target = File(exportPath.trim())
+
+                val result = withContext(Dispatchers.IO) {
+
+                    ExportService.export(
+                        projectRoot = projectRoot,
+                        targetDir = target
+                    )
+                }
+
+                lastResult = result
+
+            } catch (e: Exception) {
+
+                lastResult = ExportService.Result(
+                    success = false,
+                    filesCopied = 0,
+                    message = "Не удалось выполнить экспорт: " +
+                            (e.message ?: "неизвестная ошибка")
+                )
+
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    // =====================================================
+    // UI
+    // =====================================================
+
     Column(
-        Modifier
+        modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+
         Text(
-            "Настройки проекта",
+            text = "Настройки проекта",
             style = MaterialTheme.typography.headlineSmall
         )
 
+        // -------------------------------------------------
+        // MINECRAFT PATH
+        // -------------------------------------------------
+
         Text(
-            "Путь к папке Minecraft (.minecraft)",
+            text = "Путь к папке Minecraft (.minecraft)",
             style = MaterialTheme.typography.titleMedium
         )
 
         Row(
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+
             OutlinedTextField(
                 value = exportPath,
                 onValueChange = {
+
                     exportPath = it
-                    persistExportPath(it)
+
+                    runCatching {
+                        persistExportPath(it)
+                    }.onFailure { error ->
+                        validationError = error.message
+                            ?: "Не удалось сохранить путь."
+                    }
                 },
                 modifier = Modifier.weight(1f),
                 placeholder = {
@@ -1230,7 +1393,9 @@ fun SettingsPane(
             )
 
             Button(
+                enabled = !busy && !previewing && !validating,
                 onClick = {
+
                     val picked = FileDialogs.pickMinecraftFolder(
                         exportPath
                             .takeIf { it.isNotBlank() }
@@ -1238,8 +1403,15 @@ fun SettingsPane(
                     )
 
                     if (picked != null) {
+
                         exportPath = picked.absolutePath
-                        persistExportPath(exportPath)
+
+                        runCatching {
+                            persistExportPath(exportPath)
+                        }.onFailure { error ->
+                            validationError = error.message
+                                ?: "Не удалось сохранить путь."
+                        }
                     }
                 }
             ) {
@@ -1247,14 +1419,19 @@ fun SettingsPane(
             }
         }
 
+        // -------------------------------------------------
+        // DESTINATION
+        // -------------------------------------------------
+
         if (exportPath.isNotBlank()) {
+
             val destination = File(
                 exportPath,
                 "config/scriptfx/projects/${projectRoot.name}"
             )
 
             Text(
-                "Будет экспортировано в: ${destination.absolutePath}",
+                text = "Папка экспорта: ${destination.absolutePath}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1262,117 +1439,89 @@ fun SettingsPane(
 
         HorizontalDivider()
 
+        // -------------------------------------------------
+        // VALIDATION BUTTON
+        // -------------------------------------------------
+
         OutlinedButton(
-            enabled = !busy && !validating,
+            enabled = !busy && !validating && !previewing,
             onClick = {
-                validationScope.launch {
-                    validating = true
-                    validationError = null
-
-                    try {
-                        val target = exportPath
-                            .takeIf { it.isNotBlank() }
-                            ?.let(::File)
-
-                        validationReport = withContext(Dispatchers.IO) {
-                            ExportService.validateProject(
-                                projectRoot = projectRoot,
-                                targetDir = target
-                            )
-                        }
-
-                        showValidationDialog = true
-                    } catch (e: Exception) {
-                        validationError = e.message
-                            ?: "Не удалось проверить проект"
-                    } finally {
-                        validating = false
-                    }
-                }
+                validateProject()
             }
         ) {
             Text(
-                if (validating) "Проверка…" else "Проверить проект"
+                if (validating) {
+                    "Проверка проекта…"
+                } else {
+                    "Проверить проект"
+                }
             )
         }
 
-        validationError?.let {
+        // -------------------------------------------------
+        // PREVIEW BUTTON
+        // -------------------------------------------------
+
+        Button(
+            enabled = !busy &&
+                    !validating &&
+                    !previewing &&
+                    exportPath.isNotBlank(),
+            onClick = {
+                prepareExportPreview()
+            }
+        ) {
             Text(
-                it,
+                if (previewing) {
+                    "Подготовка предпросмотра…"
+                } else {
+                    "Предпросмотр экспорта"
+                }
+            )
+        }
+
+        // -------------------------------------------------
+        // ERRORS
+        // -------------------------------------------------
+
+        validationError?.let {
+
+            Text(
+                text = it,
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall
             )
         }
 
-
-        Button(
-            enabled = !busy &&
-                    !validating &&
-                    exportPath.isNotBlank(),
-            onClick = {
-                val target = File(exportPath.trim())
-
-                validationScope.launch {
-                    busy = true
-                    validationFilter = null
-
-                    try {
-                        val result = withContext(Dispatchers.IO) {
-                            ExportService.export(
-                                projectRoot = projectRoot,
-                                targetDir = target
-                            )
-                        }
-
-                        lastResult = result
-
-                        showValidationDetails =
-                            result.validation?.hasIssues == true
-
-                    } catch (e: Exception) {
-                        lastResult = ExportService.Result(
-                            success = false,
-                            filesCopied = 0,
-                            message = "Не удалось выполнить экспорт: " +
-                                    (e.message ?: "неизвестная ошибка")
-                        )
-
-                        showValidationDetails = false
-
-                    } finally {
-                        busy = false
-                    }
-                }
-            }
-        ) {
-            Text(
-                if (busy) {
-                    "Экспорт…"
-                } else {
-                    "Экспортировать в игру"
-                }
-            )
-        }
-
+        // -------------------------------------------------
+        // LAST EXPORT RESULT
+        // -------------------------------------------------
 
         lastResult?.let { result ->
+
             val resultColor = if (result.success) {
                 MaterialTheme.colorScheme.primary
             } else {
                 MaterialTheme.colorScheme.error
             }
 
+            HorizontalDivider()
+
             Text(
-                result.message,
+                text = result.message,
                 color = resultColor,
                 style = MaterialTheme.typography.bodyMedium
             )
 
             result.validation?.let { report ->
+
                 if (report.hasIssues) {
+
                     TextButton(
                         onClick = {
-                            showValidationDetails = true
+
+                            validationReport = report
+                            showValidationDialog = true
                         }
                     ) {
                         Text(
@@ -1385,250 +1534,79 @@ fun SettingsPane(
             }
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(
+            modifier = Modifier.weight(1f)
+        )
+
+        // -------------------------------------------------
+        // INFO
+        // -------------------------------------------------
 
         Text(
-            "Экспорт копирует содержимое проекта в " +
+            text = "Экспорт копирует содержимое проекта в " +
                     "config/scriptfx/projects/<name>. " +
-                    "Файлы *.graph.json нужны только Studio — мод их игнорирует.",
+                    "Сценарии из scenarios/ преобразуются в scripts/. " +
+                    "Файлы *.graph.json остаются только в Studio.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 
-    // =================================================
-    // VALIDATION RESULTS DIALOG
-    // =================================================
+    // =====================================================
+    // EXPORT PREVIEW DIALOG
+    // =====================================================
 
-    if (showValidationDetails) {
-        val report = lastResult?.validation
+    if (showExportPreview) {
 
-        if (report != null) {
-            AlertDialog(
-                onDismissRequest = {
-                    showValidationDetails = false
-                },
-                title = {
-                    Text("Результаты проверки сценариев")
-                },
+        exportPreview?.let { plan ->
 
-                text = {
-                    val visibleIssues = report.issues.filter { entry ->
-                        validationFilter == null ||
-                                entry.issue.severity == validationFilter
-                    }
+            ExportPreviewDialog(
+                plan = plan,
 
-                    Column(
-                        modifier = Modifier.heightIn(max = 460.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text(
-                            "Проверено сценариев: ${report.scenariosChecked}"
-                        )
-
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text(
-                                "Ошибки: ${report.errors}",
-                                color = MaterialTheme.colorScheme.error
-                            )
-
-                            Text(
-                                "Предупреждения: ${report.warnings}",
-                                color = MaterialTheme.colorScheme.tertiary
-                            )
-
-                            Text(
-                                "Инфо: ${report.infos}",
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-
-                        HorizontalDivider()
-
-                        Text(
-                            "Фильтр результатов",
-                            style = MaterialTheme.typography.labelLarge
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            FilterChip(
-                                selected = validationFilter == null,
-                                onClick = {
-                                    validationFilter = null
-                                },
-                                label = {
-                                    Text("Все")
-                                }
-                            )
-
-                            FilterChip(
-                                selected = validationFilter == GraphIssueSeverity.ERROR,
-                                onClick = {
-                                    validationFilter = GraphIssueSeverity.ERROR
-                                },
-                                label = {
-                                    Text("Ошибки")
-                                }
-                            )
-
-                            FilterChip(
-                                selected = validationFilter == GraphIssueSeverity.WARNING,
-                                onClick = {
-                                    validationFilter = GraphIssueSeverity.WARNING
-                                },
-                                label = {
-                                    Text("Предупр.")
-                                }
-                            )
-
-                            FilterChip(
-                                selected = validationFilter == GraphIssueSeverity.INFO,
-                                onClick = {
-                                    validationFilter = GraphIssueSeverity.INFO
-                                },
-                                label = {
-                                    Text("Инфо")
-                                }
-                            )
-                        }
-
-                        Text(
-                            "Показано: ${visibleIssues.size} из ${report.issues.size}",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-
-                        HorizontalDivider()
-
-                        if (visibleIssues.isEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(100.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "Нет результатов для выбранного фильтра",
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        } else {
-                            LazyColumn(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                            ) {
-                                items(visibleIssues) { entry ->
-
-                                    val issueColor = when (
-                                        entry.issue.severity
-                                    ) {
-                                        GraphIssueSeverity.ERROR ->
-                                            MaterialTheme.colorScheme.error
-
-                                        GraphIssueSeverity.WARNING ->
-                                            MaterialTheme.colorScheme.tertiary
-
-                                        GraphIssueSeverity.INFO ->
-                                            MaterialTheme.colorScheme.primary
-                                    }
-
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 9.dp),
-                                        verticalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        Text(
-                                            entry.scenarioFile,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            style = MaterialTheme.typography.labelLarge
-                                        )
-
-                                        Text(
-                                            entry.issue.severity.name,
-                                            color = issueColor,
-                                            style = MaterialTheme.typography.labelSmall
-                                        )
-
-                                        Text(
-                                            entry.issue.message,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-
-                                        entry.issue.nodeId?.let { nodeId ->
-                                            Text(
-                                                "ID узла: $nodeId",
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                style = MaterialTheme.typography.labelSmall
-                                            )
-                                        }
-
-                                        if (entry.scenarioFile != "Проект") {
-                                            TextButton(
-                                                onClick = {
-                                                    showValidationDetails = false
-
-                                                    onOpenScenarioIssue(
-                                                        entry.scenarioFile,
-                                                        entry.issue.nodeId
-                                                    )
-                                                }
-                                            ) {
-                                                Text(
-                                                    if (entry.issue.nodeId != null) {
-                                                        "Перейти к проблемному узлу →"
-                                                    } else {
-                                                        "Открыть сценарий →"
-                                                    }
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    HorizontalDivider(
-                                        color = MaterialTheme.colorScheme.outlineVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
+                onDismiss = {
+                    showExportPreview = false
                 },
 
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            showValidationDetails = false
-                        }
-                    ) {
-                        Text("Закрыть")
-                    }
+                onConfirm = {
+
+                    showExportPreview = false
+
+                    performExport()
                 }
             )
         }
     }
 
+    // =====================================================
+    // VALIDATION DIALOG
+    // =====================================================
+
     if (showValidationDialog) {
+
         validationReport?.let { report ->
+
             ProjectValidationDialog(
                 report = report,
+
                 onDismiss = {
                     showValidationDialog = false
                 },
+
                 onOpenIssue = { fileName, nodeId ->
+
                     showValidationDialog = false
-                    onOpenScenarioIssue(fileName, nodeId)
+
+                    onOpenScenarioIssue(
+                        fileName,
+                        nodeId
+                    )
                 }
             )
         }
     }
 }
+
+
 
 @Composable
 private fun ProjectValidationDialog(
