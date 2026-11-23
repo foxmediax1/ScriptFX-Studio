@@ -33,6 +33,8 @@ import net.foxmediax.app.project.ExportPreviewService
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.TextFieldValue
 import kotlinx.coroutines.delay
+import net.foxmediax.app.project.GraphRecoveryStore
+import java.util.Date
 
 enum class CanvasMode {
     NODES,
@@ -517,6 +519,30 @@ fun ScenariosPane(
         TextEditorHistoryStore()
     }
 
+    // =====================================================
+    // GRAPH RECOVERY
+    // =====================================================
+
+    val graphRecoveryStore = remember(projectRoot) {
+        GraphRecoveryStore()
+    }
+
+    var graphBaselineFingerprint by remember(projectRoot) {
+        mutableStateOf("")
+    }
+
+    var pendingGraphRecovery by remember {
+        mutableStateOf<GraphRecoveryStore.Recovery?>(null)
+    }
+
+    var pendingRecoveryFile by remember {
+        mutableStateOf<File?>(null)
+    }
+
+    var showGraphRecoveryDialog by remember {
+        mutableStateOf(false)
+    }
+
     val canUndoText by textHistory.canUndo
     val canRedoText by textHistory.canRedo
 
@@ -623,6 +649,26 @@ fun ScenariosPane(
                 }
             }
 
+            // Обновляем базовую версию файлов после сохранения.
+            graphBaselineFingerprint = graphRecoveryStore.fingerprint(
+                projectRoot,
+                file
+            )
+
+// Резервная копия больше не нужна,
+// потому что сценарий успешно сохранён.
+            runCatching {
+                graphRecoveryStore.clear(
+                    projectRoot,
+                    file
+                )
+            }.onFailure {
+                println(
+                    "ScriptFX Studio: не удалось очистить резервную копию: " +
+                            it.message
+                )
+            }
+
             dirty = false
 
             reloadFiles()
@@ -646,14 +692,19 @@ fun ScenariosPane(
 
     fun openFile(file: File) {
 
-        // Сначала сохраняем предыдущий сценарий.
-        if (dirty) {
-            persist()
+        // Не переключаем сценарий, если предыдущий
+        // не удалось сохранить.
+        if (dirty && !persist()) {
+            return
         }
+
+        showGraphRecoveryDialog = false
+        pendingGraphRecovery = null
+        pendingRecoveryFile = null
 
         val previousFile = currentFile
 
-        // Сохраняем историю предыдущего сценария.
+        // Сохраняем историю предыдущего текстового сценария.
         if (
             previousFile != null &&
             mode == CanvasMode.TEXT
@@ -681,6 +732,11 @@ fun ScenariosPane(
 
             val strippedText = ScriptNodeSync.stripMeta(fileText)
 
+            val loadedFingerprint = graphRecoveryStore.fingerprint(
+                projectRoot,
+                file
+            )
+
             val sidecar = File(
                 file.parentFile,
                 "${file.nameWithoutExtension}.graph.json"
@@ -706,6 +762,7 @@ fun ScenariosPane(
             )
 
             currentFile = file
+            graphBaselineFingerprint = loadedFingerprint
 
             graph = savedGraph
                 ?: ScriptNodeSync.textToGraph(fileText)
@@ -748,6 +805,19 @@ fun ScenariosPane(
                 }
 
                 dirty = false
+
+                // Проверяем наличие резервной копии нодового графа.
+                val recovery = graphRecoveryStore.load(
+                    projectRoot = projectRoot,
+                    scenarioFile = file,
+                    expectedBaselineFingerprint = loadedFingerprint
+                )
+
+                if (recovery != null) {
+                    pendingGraphRecovery = recovery
+                    pendingRecoveryFile = file
+                    showGraphRecoveryDialog = true
+                }
             }
 
         }.onFailure { error ->
@@ -831,6 +901,57 @@ fun ScenariosPane(
             )
 
             pendingFocusNodeId = null
+        }
+    }
+
+    // =====================================================
+// AUTOMATIC GRAPH RECOVERY
+// =====================================================
+
+    LaunchedEffect(
+        currentFile?.absolutePath,
+        mode,
+        graphRevision,
+        dirty,
+        graphBaselineFingerprint
+    ) {
+
+        val file = currentFile
+            ?: return@LaunchedEffect
+
+        if (mode != CanvasMode.NODES) {
+            return@LaunchedEffect
+        }
+
+        if (!dirty || graphBaselineFingerprint.isBlank()) {
+            return@LaunchedEffect
+        }
+
+        // Создаём снимок до задержки.
+        // Это исключает чтение уже изменённого графа из фоновой задачи.
+        val graphSnapshot = graph.toJson()
+        val baseline = graphBaselineFingerprint
+
+        delay(700)
+
+        runCatching {
+
+            withContext(Dispatchers.IO) {
+
+                graphRecoveryStore.save(
+                    projectRoot = projectRoot,
+                    scenarioFile = file,
+                    baselineFingerprint = baseline,
+                    graphJson = graphSnapshot
+                )
+            }
+
+        }.onFailure { error ->
+
+            println(
+                "ScriptFX Studio: не удалось сохранить резервную копию графа: " +
+                        error.message
+            )
         }
     }
 
@@ -1279,13 +1400,15 @@ fun ScenariosPane(
 
                             CanvasMode.NODES -> {
 
-                                persist()
+                                // Не переключаем редактор, если сохранение не удалось.
+                                if (persist()) {
 
-                                textModeBaseline = textFieldValue.text
+                                    textModeBaseline = textFieldValue.text
 
-                                textHistory.reset()
+                                    textHistory.reset()
 
-                                mode = CanvasMode.TEXT
+                                    mode = CanvasMode.TEXT
+                                }
                             }
 
                             CanvasMode.TEXT -> {
@@ -1435,6 +1558,116 @@ fun ScenariosPane(
                     )
                 }
             }
+        }
+    }
+    // =====================================================
+// GRAPH RECOVERY DIALOG
+// =====================================================
+
+    if (showGraphRecoveryDialog) {
+
+        val recovery = pendingGraphRecovery
+        val recoveryFile = pendingRecoveryFile
+
+        if (
+            recovery != null &&
+            recoveryFile != null
+        ) {
+
+            AlertDialog(
+                onDismissRequest = {
+                    runCatching {
+                        graphRecoveryStore.clear(
+                            projectRoot,
+                            recoveryFile
+                        )
+                    }
+
+                    pendingGraphRecovery = null
+                    pendingRecoveryFile = null
+                    showGraphRecoveryDialog = false
+                },
+
+                title = {
+                    Text("Найдена резервная копия")
+                },
+
+                text = {
+
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+
+                        Text(
+                            "Для сценария ${recoveryFile.name} найдена " +
+                                    "автоматически сохранённая копия графа."
+                        )
+
+                        Text(
+                            "Время сохранения: ${Date(recovery.savedAtMillis)}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+
+                        Text(
+                            "Восстановление не перезапишет исходный файл. " +
+                                    "После восстановления изменения можно будет " +
+                                    "проверить и сохранить обычным способом."
+                        )
+                    }
+                },
+
+                confirmButton = {
+
+                    Button(
+                        onClick = {
+
+                            graph = recovery.graph
+
+                            canvasController.resetHistory(
+                                recovery.graph
+                            )
+
+                            graphRevision++
+
+                            mode = CanvasMode.NODES
+                            dirty = true
+
+                            pendingGraphRecovery = null
+                            pendingRecoveryFile = null
+                            showGraphRecoveryDialog = false
+                        }
+                    ) {
+                        Text("Восстановить")
+                    }
+                },
+
+                dismissButton = {
+
+                    TextButton(
+                        onClick = {
+
+                            runCatching {
+                                graphRecoveryStore.clear(
+                                    projectRoot,
+                                    recoveryFile
+                                )
+                            }.onFailure {
+                                println(
+                                    "ScriptFX Studio: не удалось удалить резервную копию: " +
+                                            it.message
+                                )
+                            }
+
+                            pendingGraphRecovery = null
+                            pendingRecoveryFile = null
+                            showGraphRecoveryDialog = false
+                        }
+                    ) {
+                        Text("Отбросить")
+                    }
+                }
+            )
         }
     }
 }
