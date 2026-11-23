@@ -1,14 +1,26 @@
 
 package net.foxmediax.app.project
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
 import net.foxmediax.utils.nodes.GraphIssue
 import net.foxmediax.utils.nodes.GraphIssueSeverity
 import net.foxmediax.utils.nodes.GraphValidator
 import net.foxmediax.utils.nodes.NodeGraph
 import net.foxmediax.utils.nodes.NodeKind
 import net.foxmediax.utils.nodes.ScriptNodeSync
+
 import java.io.File
 import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 
 object ExportService {
 
@@ -68,6 +80,242 @@ object ExportService {
         val name: String? = null,
         val error: String? = null
     )
+
+    // =====================================================
+    // EXPORT OWNERSHIP MANIFEST
+    // =====================================================
+
+    private const val EXPORT_MANIFEST_FILE =
+        ".scriptfx-studio-export-manifest.json"
+
+    private const val EXPORT_MANIFEST_FORMAT =
+        "scriptfx-studio-export-manifest"
+
+    private const val EXPORT_MANIFEST_VERSION = 1
+
+    private val exportManifestJson = Json {
+        prettyPrint = true
+    }
+
+    /**
+     * Разрешены только относительные пути runtime-сценариев:
+     *
+     * scripts/main.sfxs
+     * scripts/nested/reward.sfxs
+     *
+     * Пути за пределы scripts/ запрещены.
+     */
+    private fun normalizeManagedScriptPath(
+        path: String
+    ): String? {
+
+        if (path.isBlank()) return null
+
+        if (
+            path.startsWith("/") ||
+            path.contains('\\') ||
+            path.contains(':')
+        ) {
+            return null
+        }
+
+        if (!path.startsWith("scripts/")) {
+            return null
+        }
+
+        if (!path.endsWith(".sfxs")) {
+            return null
+        }
+
+        val segments = path.split('/')
+
+        if (
+            segments.size < 2 ||
+            segments.first() != "scripts" ||
+            segments.drop(1).any {
+                it.isBlank() ||
+                        it == "." ||
+                        it == ".."
+            }
+        ) {
+            return null
+        }
+
+        return path
+    }
+
+    /**
+     * Проверяет, что candidate находится внутри root.
+     *
+     * canonicalPath учитывает существующие символические ссылки.
+     */
+    private fun isSafeDestinationPath(
+        root: File,
+        candidate: File
+    ): Boolean {
+        return runCatching {
+            val rootPath = root.canonicalFile.toPath()
+            val candidatePath = candidate.canonicalFile.toPath()
+
+            candidatePath != rootPath &&
+                    candidatePath.startsWith(rootPath)
+        }.getOrDefault(false)
+    }
+
+    /**
+     * SHA-256 файла.
+     */
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(8192)
+
+            while (true) {
+                val read = input.read(buffer)
+
+                if (read < 0) break
+
+                digest.update(buffer, 0, read)
+            }
+        }
+
+        return digest.digest().joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xFF)
+        }
+    }
+
+    /**
+     * Загружает предыдущий манифест.
+     *
+     * Повреждённый или неизвестный манифест блокирует экспорт,
+     * чтобы не выполнять небезопасную очистку файлов.
+     */
+    private fun readExportManifest(
+        file: File
+    ): Map<String, String> {
+
+        val root = exportManifestJson
+            .parseToJsonElement(file.readText())
+            .jsonObject
+
+        val format = root["format"]
+            ?.jsonPrimitive
+            ?.content
+
+        if (format != EXPORT_MANIFEST_FORMAT) {
+            throw IOException(
+                "Неизвестный формат манифеста экспорта."
+            )
+        }
+
+        val version = root["version"]
+            ?.jsonPrimitive
+            ?.int
+
+        if (version != EXPORT_MANIFEST_VERSION) {
+            throw IOException(
+                "Неподдерживаемая версия манифеста экспорта: $version"
+            )
+        }
+
+        val scripts = root["managedScripts"]
+            ?.jsonObject
+            ?: throw IOException(
+                "В манифесте отсутствует managedScripts."
+            )
+
+        val result = linkedMapOf<String, String>()
+
+        scripts.forEach { (rawPath, rawHash) ->
+
+            val path = normalizeManagedScriptPath(rawPath)
+                ?: throw IOException(
+                    "Небезопасный путь в манифесте: $rawPath"
+                )
+
+            val hash = rawHash.jsonPrimitive.content
+
+            if (!Regex("""^[0-9a-f]{64}$""").matches(hash)) {
+                throw IOException(
+                    "Некорректный SHA-256 для файла: $path"
+                )
+            }
+
+            result[path] = hash
+        }
+
+        return result
+    }
+
+    /**
+     * Атомарно записывает манифест.
+     */
+    private fun writeExportManifest(
+        destRoot: File,
+        managedScripts: Map<String, String>
+    ) {
+
+        val manifestFile = File(
+            destRoot,
+            EXPORT_MANIFEST_FILE
+        )
+
+        val temporaryFile = File(
+            destRoot,
+            "$EXPORT_MANIFEST_FILE.tmp"
+        )
+
+        if (
+            !isSafeDestinationPath(destRoot, manifestFile) ||
+            !isSafeDestinationPath(destRoot, temporaryFile)
+        ) {
+            throw SecurityException(
+                "Небезопасный путь манифеста экспорта."
+            )
+        }
+
+        val manifest = JsonObject(
+            linkedMapOf(
+                "format" to JsonPrimitive(
+                    EXPORT_MANIFEST_FORMAT
+                ),
+                "version" to JsonPrimitive(
+                    EXPORT_MANIFEST_VERSION
+                ),
+                "managedScripts" to JsonObject(
+                    managedScripts
+                        .toSortedMap()
+                        .mapValues { (_, hash) ->
+                            JsonPrimitive(hash)
+                        }
+                )
+            )
+        )
+
+        temporaryFile.writeText(manifest.toString())
+
+        try {
+            try {
+                Files.move(
+                    temporaryFile.toPath(),
+                    manifestFile.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(
+                    temporaryFile.toPath(),
+                    manifestFile.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }
+        } finally {
+            if (temporaryFile.exists()) {
+                temporaryFile.delete()
+            }
+        }
+    }
 
     // =====================================================
     // TARGET VALIDATION
@@ -154,8 +402,7 @@ object ExportService {
         }
 
         // Runtime ScriptFX загружает файлы из scripts/.
-        // Studio хранит создаваемые сценарии в scenarios/.
-        // Поэтому проверяем обе папки.
+        // Studio хранит сценарии в scenarios/.
         val sourceRoots = listOf(
             File(projectRoot, "scenarios"),
             File(projectRoot, "scripts")
@@ -234,7 +481,8 @@ object ExportService {
         // SCRIPTS FROM OTHER EXPORTED PROJECTS
         // -------------------------------------------------
 
-        val externalFilesByName = mutableMapOf<String, MutableList<String>>()
+        val externalFilesByName =
+            mutableMapOf<String, MutableList<String>>()
 
         if (targetDir != null) {
             val projectsDir = File(
@@ -251,7 +499,7 @@ object ExportService {
                     directory.isDirectory &&
                             directory.name != currentProjectFolder
                 }
-                ?.forEach { otherProject ->
+                ?.forEach projectLoop@ { otherProject ->
 
                     val scriptsDir = File(
                         otherProject,
@@ -259,7 +507,7 @@ object ExportService {
                     )
 
                     if (!scriptsDir.isDirectory) {
-                        return@forEach
+                        return@projectLoop
                     }
 
                     scriptsDir.walkTopDown()
@@ -434,16 +682,11 @@ object ExportService {
 
         val calls = mutableListOf<CallReference>()
 
-        // Уникальные имена существующих сценариев.
-        val uniqueLocalNames = localFilesByName
-            .filterValues { it.size == 1 }
-            .keys
-
         records.forEach { record ->
 
             record.graph.nodes
                 .filter { it.kind == NodeKind.CALL }
-                .forEach { node ->
+                .forEach nodeLoop@ { node ->
 
                     val rawTarget = node.params["target"].orEmpty()
 
@@ -456,11 +699,11 @@ object ExportService {
                             node.id
                         )
 
-                        return@forEach
+                        return@nodeLoop
                     }
 
                     val targetName = parsed.name
-                        ?: return@forEach
+                        ?: return@nodeLoop
 
                     val localMatches =
                         localFilesByName[targetName].orEmpty()
@@ -614,12 +857,12 @@ object ExportService {
             )
         }
 
-        val manifest = File(
+        val projectManifest = File(
             projectRoot,
             "scriptfx.project.json"
         )
 
-        if (!manifest.isFile) {
+        if (!projectManifest.isFile) {
             return Result(
                 false,
                 0,
@@ -636,7 +879,6 @@ object ExportService {
             subfolder = subfolder
         )
 
-        // Критические ошибки блокируют экспорт.
         if (validation.hasErrors) {
             return Result(
                 success = false,
@@ -655,24 +897,104 @@ object ExportService {
             "config/scriptfx/projects/${sanitize(projectName)}"
         )
 
+        val destinationExistedBeforeExport = destRoot.exists()
+
+        var copied = 0
+
         return try {
-            var copied = 0
 
-            projectRoot.walkTopDown().forEach { src ->
+            // Проверяем путь до создания папки.
+            if (!isSafeDestinationPath(targetDir, destRoot)) {
+                throw SecurityException(
+                    "Папка экспорта находится за пределами Minecraft."
+                )
+            }
 
-                if (!src.isFile) {
-                    return@forEach
+            if (
+                destRoot.exists() &&
+                !destRoot.isDirectory
+            ) {
+                throw IOException(
+                    "Путь экспорта существует, но не является папкой."
+                )
+            }
+
+            if (!destRoot.exists() && !destRoot.mkdirs()) {
+                throw IOException(
+                    "Не удалось создать папку экспорта: ${destRoot.absolutePath}"
+                )
+            }
+
+            // Повторная проверка после создания папки.
+            if (!isSafeDestinationPath(targetDir, destRoot)) {
+                throw SecurityException(
+                    "Небезопасный путь папки экспорта."
+                )
+            }
+
+            // ---------------------------------------------
+            // READ PREVIOUS OWNERSHIP MANIFEST
+            // ---------------------------------------------
+
+            val ownershipFile = File(
+                destRoot,
+                EXPORT_MANIFEST_FILE
+            )
+
+            val hadOwnershipManifest = ownershipFile.exists()
+
+            if (
+                hadOwnershipManifest &&
+                (
+                        !ownershipFile.isFile ||
+                                !isSafeDestinationPath(destRoot, ownershipFile)
+                        )
+            ) {
+                throw IOException(
+                    "Манифест экспорта имеет небезопасный путь."
+                )
+            }
+
+            val previousManagedScripts =
+                if (hadOwnershipManifest) {
+                    try {
+                        readExportManifest(ownershipFile)
+                    } catch (e: Exception) {
+                        throw IOException(
+                            "Не удалось прочитать манифест экспорта. " +
+                                    "Очистка отменена: ${e.message}",
+                            e
+                        )
+                    }
+                } else {
+                    emptyMap()
                 }
+
+            // ---------------------------------------------
+            // COPY CURRENT PROJECT FILES
+            // ---------------------------------------------
+
+            val currentManagedScripts =
+                linkedMapOf<String, String>()
+
+            val sourceFiles = projectRoot
+                .walkTopDown()
+                .filter { it.isFile }
+                .toList()
+
+            sourceFiles.forEach { src ->
 
                 val relativePath = src
                     .relativeTo(projectRoot)
-                    .path
-                    .replace('\\', '/')
+                    .invariantSeparatorsPath
 
+                // Служебные и временные файлы Studio.
                 if (
                     relativePath.startsWith(".git/") ||
                     relativePath.endsWith(".tmp") ||
                     relativePath.endsWith("~") ||
+                    relativePath == EXPORT_MANIFEST_FILE ||
+                    relativePath == "$EXPORT_MANIFEST_FILE.tmp" ||
                     relativePath.endsWith(
                         ".graph.json",
                         ignoreCase = true
@@ -682,7 +1004,7 @@ object ExportService {
                 }
 
                 // Studio хранит сценарии в scenarios/,
-                // но ScriptFX Runtime загружает их из scripts/.
+                // Runtime загружает их из scripts/.
                 val exportPath = if (
                     relativePath.startsWith("scenarios/") &&
                     src.extension.equals("sfxs", ignoreCase = true)
@@ -697,7 +1019,28 @@ object ExportService {
                     exportPath
                 )
 
-                destination.parentFile.mkdirs()
+                if (!isSafeDestinationPath(destRoot, destination)) {
+                    throw SecurityException(
+                        "Небезопасный путь назначения: $exportPath"
+                    )
+                }
+
+                val parent = destination.parentFile
+                    ?: throw IOException(
+                        "Не удалось определить папку назначения."
+                    )
+
+                if (!parent.exists() && !parent.mkdirs()) {
+                    throw IOException(
+                        "Не удалось создать папку: ${parent.absolutePath}"
+                    )
+                }
+
+                if (!parent.isDirectory) {
+                    throw IOException(
+                        "Папка назначения недоступна: ${parent.absolutePath}"
+                    )
+                }
 
                 src.copyTo(
                     destination,
@@ -705,21 +1048,130 @@ object ExportService {
                 )
 
                 copied++
+
+                // В манифест попадают только runtime-сценарии.
+                val managedPath = normalizeManagedScriptPath(
+                    exportPath
+                )
+
+                if (managedPath != null) {
+                    currentManagedScripts[managedPath] =
+                        sha256(destination)
+                }
             }
 
-            val warningSuffix = if (validation.warnings > 0) {
-                " Предупреждений: ${validation.warnings}."
-            } else {
-                ""
+            // ---------------------------------------------
+            // REMOVE STALE MANAGED SCRIPTS
+            // ---------------------------------------------
+
+            var removed = 0
+            var preserved = 0
+
+            val stalePaths = previousManagedScripts.keys
+                .filterNot {
+                    it in currentManagedScripts
+                }
+
+            stalePaths.forEach { relativePath ->
+
+                val staleFile = File(
+                    destRoot,
+                    relativePath
+                )
+
+                if (!isSafeDestinationPath(destRoot, staleFile)) {
+                    preserved++
+                    return@forEach
+                }
+
+                // Файл уже удалён вручную.
+                if (!staleFile.exists()) {
+                    return@forEach
+                }
+
+                if (!staleFile.isFile) {
+                    preserved++
+                    return@forEach
+                }
+
+                val previousHash =
+                    previousManagedScripts[relativePath]
+                        ?: return@forEach
+
+                // Если пользователь изменил экспортированный файл,
+                // Studio оставляет его нетронутым.
+                val currentHash = sha256(staleFile)
+
+                if (currentHash != previousHash) {
+                    preserved++
+                    return@forEach
+                }
+
+                if (!staleFile.delete()) {
+                    throw IOException(
+                        "Не удалось удалить устаревший сценарий: $relativePath"
+                    )
+                }
+
+                removed++
+            }
+
+            // ---------------------------------------------
+            // WRITE NEW OWNERSHIP MANIFEST
+            // ---------------------------------------------
+
+            writeExportManifest(
+                destRoot = destRoot,
+                managedScripts = currentManagedScripts
+            )
+
+            // ---------------------------------------------
+            // RESULT MESSAGE
+            // ---------------------------------------------
+
+            val message = buildString {
+
+                append(
+                    "Экспортировано $copied файлов в " +
+                            "${destRoot.absolutePath}. "
+                )
+
+                append(
+                    "Проверено сценариев: " +
+                            "${validation.scenariosChecked}. "
+                )
+
+                append(
+                    "Удалено устаревших сценариев: $removed."
+                )
+
+                if (preserved > 0) {
+                    append(
+                        " Оставлено без изменений файлов: $preserved " +
+                                "(изменены вручную или защищены)."
+                    )
+                }
+
+                if (
+                    destinationExistedBeforeExport &&
+                    !hadOwnershipManifest
+                ) {
+                    append(
+                        " Старые файлы без манифеста автоматически не удалялись."
+                    )
+                }
+
+                if (validation.warnings > 0) {
+                    append(
+                        " Предупреждений проверки: ${validation.warnings}."
+                    )
+                }
             }
 
             Result(
                 success = true,
                 filesCopied = copied,
-                message =
-                    "Экспортировано $copied файлов в ${destRoot.absolutePath}. " +
-                            "Проверено сценариев: ${validation.scenariosChecked}." +
-                            warningSuffix,
+                message = message,
                 validation = validation
             )
 
@@ -727,24 +1179,42 @@ object ExportService {
             Result(
                 success = false,
                 filesCopied = 0,
-                message = "Ошибка копирования: ${e.message}",
+                message = "Ошибка экспорта: ${e.message}",
                 validation = validation
             )
         } catch (e: SecurityException) {
             Result(
                 success = false,
                 filesCopied = 0,
-                message = "Нет доступа при экспорте: ${e.message}",
+                message = "Безопасность экспорта: ${e.message}",
+                validation = validation
+            )
+        } catch (e: Exception) {
+            Result(
+                success = false,
+                filesCopied = 0,
+                message = "Неожиданная ошибка экспорта: ${e.message}",
                 validation = validation
             )
         }
     }
 
-    private fun sanitize(name: String): String =
-        name.replace(
-            Regex("""[\\/:*?"<>|]"""),
-            "_"
-        ).ifBlank {
+    private fun sanitize(name: String): String {
+        val sanitized = name
+            .replace(
+                Regex("""[\\/:*?"<>|]"""),
+                "_"
+            )
+            .trim()
+
+        return if (
+            sanitized.isBlank() ||
+            sanitized == "." ||
+            sanitized == ".."
+        ) {
             "project"
+        } else {
+            sanitized
         }
+    }
 }
