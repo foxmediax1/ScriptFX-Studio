@@ -32,6 +32,7 @@ import kotlinx.coroutines.withContext
 import net.foxmediax.app.project.ExportPreviewService
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.TextFieldValue
+import kotlinx.coroutines.delay
 
 enum class CanvasMode {
     NODES,
@@ -512,6 +513,10 @@ fun ScenariosPane(
         TextEditorHistory(300)
     }
 
+    val textHistoryStore = remember(projectRoot) {
+        TextEditorHistoryStore()
+    }
+
     val canUndoText by textHistory.canUndo
     val canRedoText by textHistory.canRedo
 
@@ -562,11 +567,11 @@ fun ScenariosPane(
     // SAVE SCENARIO
     // =====================================================
 
-    fun persist() {
+    fun persist(): Boolean {
 
-        val file = currentFile ?: return
+        val file = currentFile ?: return false
 
-        runCatching {
+        return try {
 
             when (mode) {
 
@@ -599,7 +604,6 @@ fun ScenariosPane(
                         textFieldValue.text
                     )
 
-                    // После сохранения обновляем исходное состояние.
                     textModeBaseline = textFieldValue.text
 
                     val sidecar = File(
@@ -623,12 +627,16 @@ fun ScenariosPane(
 
             reloadFiles()
 
-        }.onFailure { error ->
+            true
+
+        } catch (error: Exception) {
 
             println(
                 "ScriptFX Studio: не удалось сохранить сценарий: " +
                         error.message
             )
+
+            false
         }
     }
 
@@ -638,13 +646,40 @@ fun ScenariosPane(
 
     fun openFile(file: File) {
 
+        // Сначала сохраняем предыдущий сценарий.
         if (dirty) {
             persist()
+        }
+
+        val previousFile = currentFile
+
+        // Сохраняем историю предыдущего сценария.
+        if (
+            previousFile != null &&
+            mode == CanvasMode.TEXT
+        ) {
+            runCatching {
+
+                textHistoryStore.save(
+                    projectRoot = projectRoot,
+                    scenarioFile = previousFile,
+                    baselineText = textModeBaseline,
+                    snapshot = textHistory.snapshot(textFieldValue)
+                )
+
+            }.onFailure {
+                println(
+                    "ScriptFX Studio: не удалось сохранить историю: " +
+                            it.message
+                )
+            }
         }
 
         runCatching {
 
             val fileText = file.readText()
+
+            val strippedText = ScriptNodeSync.stripMeta(fileText)
 
             val sidecar = File(
                 file.parentFile,
@@ -663,16 +698,14 @@ fun ScenariosPane(
 
             }.getOrNull()
 
-            currentFile = file
-
-            textFieldValue = TextFieldValue(
-                ScriptNodeSync.stripMeta(fileText)
+            // Проверяем, есть ли сохранённая история.
+            val restoredHistory = textHistoryStore.load(
+                projectRoot = projectRoot,
+                scenarioFile = file,
+                expectedBaselineText = strippedText
             )
 
-            textModeBaseline = textFieldValue.text
-
-            // История другого сценария не переносится.
-            textHistory.reset()
+            currentFile = file
 
             graph = savedGraph
                 ?: ScriptNodeSync.textToGraph(fileText)
@@ -681,16 +714,41 @@ fun ScenariosPane(
 
             graphRevision++
 
-            mode = if (
-                savedGraph != null ||
-                ScriptNodeSync.hasMeta(fileText)
-            ) {
-                CanvasMode.NODES
-            } else {
-                CanvasMode.TEXT
-            }
+            if (restoredHistory != null) {
 
-            dirty = false
+                // Восстанавливаем текст и историю.
+                textFieldValue = textHistory.restore(
+                    restoredHistory.snapshot
+                )
+
+                textModeBaseline = restoredHistory.baselineText
+
+                mode = CanvasMode.TEXT
+
+                dirty = textFieldValue.text != textModeBaseline
+
+            } else {
+
+                // Открываем сценарий как обычно.
+                textFieldValue = TextFieldValue(
+                    strippedText
+                )
+
+                textModeBaseline = strippedText
+
+                textHistory.reset()
+
+                mode = if (
+                    savedGraph != null ||
+                    ScriptNodeSync.hasMeta(fileText)
+                ) {
+                    CanvasMode.NODES
+                } else {
+                    CanvasMode.TEXT
+                }
+
+                dirty = false
+            }
 
         }.onFailure { error ->
 
@@ -773,6 +831,58 @@ fun ScenariosPane(
             )
 
             pendingFocusNodeId = null
+        }
+    }
+
+    // =====================================================
+    // PERSIST TEXT EDITOR HISTORY
+    // =====================================================
+
+    LaunchedEffect(
+        currentFile?.absolutePath,
+        mode,
+        textFieldValue,
+        textModeBaseline,
+        canUndoText,
+        canRedoText
+    ) {
+
+        val file = currentFile
+            ?: return@LaunchedEffect
+
+        // История нужна только текстовому редактору.
+        if (mode != CanvasMode.TEXT) {
+            return@LaunchedEffect
+        }
+
+        val baseline = textModeBaseline
+
+        val snapshot = textHistory.snapshot(
+            textFieldValue
+        )
+
+        // Небольшая задержка, чтобы не записывать файл
+        // после каждого отдельного движения курсора.
+        delay(350)
+
+        runCatching {
+
+            withContext(Dispatchers.IO) {
+
+                textHistoryStore.save(
+                    projectRoot = projectRoot,
+                    scenarioFile = file,
+                    baselineText = baseline,
+                    snapshot = snapshot
+                )
+            }
+
+        }.onFailure { error ->
+
+            println(
+                "ScriptFX Studio: ошибка сохранения истории: " +
+                        error.message
+            )
         }
     }
 
@@ -1202,6 +1312,23 @@ fun ScenariosPane(
 
                                 textHistory.reset()
 
+                                currentFile?.let { file ->
+
+                                    runCatching {
+
+                                        textHistoryStore.clear(
+                                            projectRoot,
+                                            file
+                                        )
+
+                                    }.onFailure {
+                                        println(
+                                            "ScriptFX Studio: не удалось очистить историю: " +
+                                                    it.message
+                                        )
+                                    }
+                                }
+
                                 mode = CanvasMode.NODES
                             }
                         }
@@ -1248,15 +1375,65 @@ fun ScenariosPane(
     }
 
     // =====================================================
-    // SAVE WHEN EDITOR CLOSES
-    // =====================================================
+// SAVE WHEN EDITOR CLOSES
+// =====================================================
 
-    DisposableEffect(Unit) {
+    val latestCurrentFile by rememberUpdatedState(currentFile)
+    val latestMode by rememberUpdatedState(mode)
+    val latestTextValue by rememberUpdatedState(textFieldValue)
+    val latestBaseline by rememberUpdatedState(textModeBaseline)
+    val latestDirty by rememberUpdatedState(dirty)
+
+    val latestSnapshot by rememberUpdatedState(
+        textHistory.snapshot(textFieldValue)
+    )
+
+    val latestPersist by rememberUpdatedState(
+        newValue = { persist() }
+    )
+
+    DisposableEffect(projectRoot) {
 
         onDispose {
 
-            if (dirty) {
-                persist()
+            val file = latestCurrentFile
+            val wasDirty = latestDirty
+
+            // Сначала пытаемся сохранить сам сценарий.
+            val saved = if (wasDirty) {
+                latestPersist()
+            } else {
+                true
+            }
+
+            // Затем сохраняем историю.
+            if (
+                file != null &&
+                latestMode == CanvasMode.TEXT
+            ) {
+
+                val baseline = if (wasDirty && saved) {
+                    latestTextValue.text
+                } else {
+                    latestBaseline
+                }
+
+                runCatching {
+
+                    textHistoryStore.save(
+                        projectRoot = projectRoot,
+                        scenarioFile = file,
+                        baselineText = baseline,
+                        snapshot = latestSnapshot
+                    )
+
+                }.onFailure { error ->
+
+                    println(
+                        "ScriptFX Studio: не удалось сохранить историю " +
+                                "при закрытии редактора: ${error.message}"
+                    )
+                }
             }
         }
     }
