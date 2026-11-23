@@ -1,10 +1,14 @@
+
 package net.foxmediax.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
@@ -12,31 +16,32 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.zIndex
-import net.foxmediax.app.project.ExportService
-import net.foxmediax.app.project.ProjectManifest
-import net.foxmediax.utils.nodes.GraphNode
-import net.foxmediax.utils.nodes.GraphIssueSeverity
-import net.foxmediax.utils.nodes.NodeGraph
-import net.foxmediax.utils.nodes.ScriptNodeSync
-import java.io.File
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import net.foxmediax.app.project.ExportPreviewService
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import net.foxmediax.app.project.GraphRecoveryStore
-import java.util.Date
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+import net.foxmediax.app.project.ExportPreviewService
+import net.foxmediax.app.project.ExportService
 import net.foxmediax.app.project.GraphHistoryStore
+import net.foxmediax.app.project.GraphRecoveryStore
+import net.foxmediax.app.project.ProjectManifest
+
+import net.foxmediax.utils.nodes.GraphIssueSeverity
+import net.foxmediax.utils.nodes.GraphNode
+import net.foxmediax.utils.nodes.NodeGraph
 import net.foxmediax.utils.nodes.NodeGraphHistory
+import net.foxmediax.utils.nodes.ScriptNodeSync
+
+import java.io.File
+import java.util.Date
 
 enum class CanvasMode {
     NODES,
@@ -68,7 +73,6 @@ fun ProjectWorkspace(
         mutableStateOf(WorkspaceTab.SCENARIOS)
     }
 
-    // Команда перехода из диагностики.
     var navigationFileName by remember {
         mutableStateOf<String?>(null)
     }
@@ -121,8 +125,6 @@ fun ProjectWorkspace(
                         onOpenScenarioIssue = { fileName, nodeId ->
                             navigationFileName = fileName
                             navigationNodeId = nodeId
-
-                            // Переключаемся в редактор сценариев.
                             tab = WorkspaceTab.SCENARIOS
                         }
                     )
@@ -160,7 +162,6 @@ private fun StudioTopBar(
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // BRAND
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -209,7 +210,6 @@ private fun StudioTopBar(
 
             Spacer(Modifier.width(20.dp))
 
-            // PROJECT
             Column(
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
@@ -399,7 +399,6 @@ fun PlaceholderPane(name: String) {
 // SCENARIOS PANE
 // =====================================================
 
-
 @Composable
 fun ScenariosPane(
     projectRoot: File,
@@ -419,7 +418,6 @@ fun ScenariosPane(
     }
 
     fun getScenarioFiles(): List<File> {
-
         return scenariosDir.listFiles()
             ?.filter {
                 it.isFile &&
@@ -439,11 +437,9 @@ fun ScenariosPane(
     // =====================================================
 
     val initialFile = remember(scenariosDir) {
-
         val existing = getScenarioFiles().firstOrNull()
 
         existing ?: run {
-
             val file = File(
                 scenariosDir,
                 "main.sfxs"
@@ -545,12 +541,9 @@ fun ScenariosPane(
         mutableStateOf(false)
     }
 
-    val canUndoText by textHistory.canUndo
-    val canRedoText by textHistory.canRedo
-
     // =====================================================
-// PERSISTENT GRAPH HISTORY
-// =====================================================
+    // PERSISTENT GRAPH HISTORY
+    // =====================================================
 
     val graphHistoryStore = remember(projectRoot) {
         GraphHistoryStore()
@@ -561,15 +554,39 @@ fun ScenariosPane(
     }
 
     // =====================================================
+    // SHARED HISTORY MANAGER
+    // =====================================================
+
+    val historyManager = remember(
+        textHistory,
+        canvasController
+    ) {
+        ProjectHistoryManager(
+            activeMode = {
+                mode
+            },
+            textHistory = textHistory,
+            graphController = canvasController,
+            currentText = {
+                textFieldValue
+            },
+            onTextRestored = { restored ->
+                textFieldValue = restored
+                dirty = restored.text != textModeBaseline
+            }
+        )
+    }
+
+    val canUndoText by historyManager.canUndo
+    val canRedoText by historyManager.canRedo
+
+    // =====================================================
     // GRAPH CALLBACKS
     // =====================================================
 
     fun notifyGraphChanged(newGraph: NodeGraph) {
-
         graph = newGraph
-
         graphRevision++
-
         dirty = true
     }
 
@@ -578,35 +595,20 @@ fun ScenariosPane(
     }
 
     // =====================================================
-    // TEXT HISTORY ACTIONS
+    // HISTORY ACTIONS
     // =====================================================
 
     fun undoText() {
-
-        val restored = textHistory.undo(
-            textFieldValue
-        ) ?: return
-
-        textFieldValue = restored
-
-        dirty = restored.text != textModeBaseline
+        historyManager.undo()
     }
 
     fun redoText() {
-
-        val restored = textHistory.redo(
-            textFieldValue
-        ) ?: return
-
-        textFieldValue = restored
-
-        dirty = restored.text != textModeBaseline
+        historyManager.redo()
     }
 
     // =====================================================
     // SAVE SCENARIO
     // =====================================================
-
 
     fun persist(): Boolean {
 
@@ -670,7 +672,7 @@ fun ScenariosPane(
                 file
             )
 
-            // Сохранённый граф больше не нуждается в аварийном восстановлении.
+            // Удаляем устаревшую аварийную копию.
             runCatching {
                 graphRecoveryStore.clear(
                     projectRoot,
@@ -683,11 +685,10 @@ fun ScenariosPane(
                 )
             }
 
-            // Сохраняем постоянную историю нодового редактора.
+            // Сохраняем постоянную историю графа.
             if (mode == CanvasMode.NODES) {
 
                 runCatching {
-
                     graphHistoryStore.save(
                         projectRoot = projectRoot,
                         scenarioFile = file,
@@ -695,7 +696,6 @@ fun ScenariosPane(
                         currentGraphJson = graph.toJson(),
                         snapshot = canvasController.historySnapshot()
                     )
-
                 }.onFailure {
                     println(
                         "ScriptFX Studio: не удалось сохранить историю графа: " +
@@ -705,7 +705,6 @@ fun ScenariosPane(
 
             } else {
 
-                // Текстовый режим больше не использует старую историю графа.
                 runCatching {
                     graphHistoryStore.clear(
                         projectRoot,
@@ -720,7 +719,6 @@ fun ScenariosPane(
             }
 
             dirty = false
-
             reloadFiles()
 
             true
@@ -736,12 +734,13 @@ fun ScenariosPane(
         }
     }
 
-
+    // =====================================================
+    // OPEN SCENARIO
+    // =====================================================
 
     fun openFile(file: File) {
 
-        // Не переключаем сценарий, если предыдущий
-        // не удалось сохранить.
+        // Не переключаем сценарий, если предыдущий не удалось сохранить.
         if (dirty && !persist()) {
             return
         }
@@ -758,16 +757,13 @@ fun ScenariosPane(
             previousFile != null &&
             mode == CanvasMode.TEXT
         ) {
-
             runCatching {
-
                 textHistoryStore.save(
                     projectRoot = projectRoot,
                     scenarioFile = previousFile,
                     baselineText = textModeBaseline,
                     snapshot = textHistory.snapshot(textFieldValue)
                 )
-
             }.onFailure {
                 println(
                     "ScriptFX Studio: не удалось сохранить историю: " +
@@ -793,7 +789,6 @@ fun ScenariosPane(
             )
 
             val savedGraph = runCatching {
-
                 if (sidecar.isFile) {
                     NodeGraph.fromJson(
                         sidecar.readText()
@@ -801,7 +796,6 @@ fun ScenariosPane(
                 } else {
                     null
                 }
-
             }.getOrNull()
 
             val restoredTextHistory = textHistoryStore.load(
@@ -824,7 +818,6 @@ fun ScenariosPane(
 
             if (restoredTextHistory != null) {
 
-                // Восстанавливаем текстовый черновик.
                 textFieldValue = textHistory.restore(
                     restoredTextHistory.snapshot
                 )
@@ -857,7 +850,7 @@ fun ScenariosPane(
                 dirty = false
             }
 
-            // Историю графа восстанавливаем только в нодовом режиме.
+            // Восстанавливаем историю графа только в нодовом режиме.
             if (mode == CanvasMode.NODES) {
 
                 val recovery = graphRecoveryStore.load(
@@ -868,8 +861,6 @@ fun ScenariosPane(
 
                 if (recovery != null) {
 
-                    // Резервная копия и история должны относиться
-                    // к одному и тому же текущему графу.
                     pendingGraphRecovery = recovery
 
                     pendingGraphHistory = graphHistoryStore.load(
@@ -884,8 +875,6 @@ fun ScenariosPane(
 
                 } else {
 
-                    // Если аварийной копии нет, восстанавливаем
-                    // историю относительно обычного сохранённого графа.
                     val savedHistory = graphHistoryStore.load(
                         projectRoot = projectRoot,
                         scenarioFile = file,
@@ -915,13 +904,11 @@ fun ScenariosPane(
         }
     }
 
-
     // =====================================================
     // INITIAL SCENARIO
     // =====================================================
 
     LaunchedEffect(initialFile) {
-
         if (navigationFileName == null) {
             openFile(initialFile)
         }
@@ -946,9 +933,7 @@ fun ScenariosPane(
             openFile(targetFile)
 
             if (navigationNodeId != null) {
-
                 mode = CanvasMode.NODES
-
                 pendingFocusNodeId = navigationNodeId
             }
 
@@ -977,7 +962,6 @@ fun ScenariosPane(
         if (graph.node(nodeId) != null) {
 
             canvasController.focusNode(nodeId)
-
             pendingFocusNodeId = null
 
         } else {
@@ -991,10 +975,9 @@ fun ScenariosPane(
         }
     }
 
-
-// =====================================================
-// AUTOMATIC GRAPH RECOVERY AND HISTORY
-// =====================================================
+    // =====================================================
+    // AUTOMATIC GRAPH RECOVERY AND HISTORY
+    // =====================================================
 
     LaunchedEffect(
         currentFile?.absolutePath,
@@ -1015,11 +998,8 @@ fun ScenariosPane(
             return@LaunchedEffect
         }
 
-        // Снимки фиксируются до задержки.
         val graphSnapshot = graph.toJson()
-
         val historySnapshot = canvasController.historySnapshot()
-
         val baseline = graphBaselineFingerprint
 
         delay(700)
@@ -1028,7 +1008,6 @@ fun ScenariosPane(
 
             withContext(Dispatchers.IO) {
 
-                // Аварийная копия текущего графа.
                 graphRecoveryStore.save(
                     projectRoot = projectRoot,
                     scenarioFile = file,
@@ -1036,7 +1015,6 @@ fun ScenariosPane(
                     graphJson = graphSnapshot
                 )
 
-                // История Undo/Redo именно для этого графа.
                 graphHistoryStore.save(
                     projectRoot = projectRoot,
                     scenarioFile = file,
@@ -1055,7 +1033,6 @@ fun ScenariosPane(
         }
     }
 
-
     // =====================================================
     // PERSIST TEXT EDITOR HISTORY
     // =====================================================
@@ -1072,19 +1049,13 @@ fun ScenariosPane(
         val file = currentFile
             ?: return@LaunchedEffect
 
-        // История нужна только текстовому редактору.
         if (mode != CanvasMode.TEXT) {
             return@LaunchedEffect
         }
 
         val baseline = textModeBaseline
+        val snapshot = textHistory.snapshot(textFieldValue)
 
-        val snapshot = textHistory.snapshot(
-            textFieldValue
-        )
-
-        // Небольшая задержка, чтобы не записывать файл
-        // после каждого отдельного движения курсора.
         delay(350)
 
         runCatching {
@@ -1113,7 +1084,37 @@ fun ScenariosPane(
     // =====================================================
 
     Column(
-        Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { event ->
+
+                if (
+                    event.type != KeyEventType.KeyDown ||
+                    !event.isCtrlPressed
+                ) {
+                    return@onPreviewKeyEvent false
+                }
+
+                when {
+
+                    event.key == Key.Z && event.isShiftPressed -> {
+                        historyManager.redo()
+                        true
+                    }
+
+                    event.key == Key.Z -> {
+                        historyManager.undo()
+                        true
+                    }
+
+                    event.key == Key.Y -> {
+                        historyManager.redo()
+                        true
+                    }
+
+                    else -> false
+                }
+            }
     ) {
 
         Row(
@@ -1175,7 +1176,6 @@ fun ScenariosPane(
                                 )
 
                                 reloadFiles()
-
                                 openFile(file)
 
                             }.onFailure {
@@ -1333,8 +1333,6 @@ fun ScenariosPane(
                                     newValue.text != textFieldValue.text
                                 ) {
 
-                                    // Сохраняем предыдущее состояние
-                                    // только при изменении содержимого.
                                     textHistory.checkpoint(
                                         textFieldValue
                                     )
@@ -1342,43 +1340,12 @@ fun ScenariosPane(
                                     dirty = true
                                 }
 
-                                // Сохраняем также новое положение курсора.
                                 textFieldValue = newValue
                             },
 
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(12.dp)
-                                .onPreviewKeyEvent { event ->
-
-                                    if (
-                                        event.type != KeyEventType.KeyDown ||
-                                        !event.isCtrlPressed
-                                    ) {
-                                        return@onPreviewKeyEvent false
-                                    }
-
-                                    when {
-
-                                        event.key == Key.Z &&
-                                                event.isShiftPressed -> {
-                                            redoText()
-                                            true
-                                        }
-
-                                        event.key == Key.Z -> {
-                                            undoText()
-                                            true
-                                        }
-
-                                        event.key == Key.Y -> {
-                                            redoText()
-                                            true
-                                        }
-
-                                        else -> false
-                                    }
-                                },
+                                .padding(12.dp),
 
                             textStyle = MaterialTheme.typography.bodyMedium
                         )
@@ -1479,6 +1446,7 @@ fun ScenariosPane(
 
                     CanvasToolbar(
                         controller = canvasController,
+                        historyManager = historyManager,
                         dirty = dirty,
                         onSave = {
                             persist()
@@ -1501,7 +1469,6 @@ fun ScenariosPane(
 
                             CanvasMode.NODES -> {
 
-                                // Не переключаем редактор, если сохранение не удалось.
                                 if (persist()) {
 
                                     textModeBaseline = textFieldValue.text
@@ -1518,7 +1485,6 @@ fun ScenariosPane(
                                     textFieldValue.text != textModeBaseline
                                 ) {
 
-
                                     val parsedGraph =
                                         ScriptNodeSync.textToGraph(
                                             textFieldValue.text
@@ -1531,13 +1497,10 @@ fun ScenariosPane(
                                     )
 
                                     graphRevision++
-
                                     dirty = true
 
                                 } else {
 
-                                    // Если текст не менялся, восстанавливаем историю
-                                    // ранее сохранённого нодового графа.
                                     currentFile?.let { file ->
 
                                         val savedHistory = graphHistoryStore.load(
@@ -1565,12 +1528,10 @@ fun ScenariosPane(
                                 currentFile?.let { file ->
 
                                     runCatching {
-
                                         textHistoryStore.clear(
                                             projectRoot,
                                             file
                                         )
-
                                     }.onFailure {
                                         println(
                                             "ScriptFX Studio: не удалось очистить историю: " +
@@ -1625,8 +1586,8 @@ fun ScenariosPane(
     }
 
     // =====================================================
-// SAVE WHEN EDITOR CLOSES
-// =====================================================
+    // SAVE WHEN EDITOR CLOSES
+    // =====================================================
 
     val latestCurrentFile by rememberUpdatedState(currentFile)
     val latestMode by rememberUpdatedState(mode)
@@ -1649,14 +1610,12 @@ fun ScenariosPane(
             val file = latestCurrentFile
             val wasDirty = latestDirty
 
-            // Сначала пытаемся сохранить сам сценарий.
             val saved = if (wasDirty) {
                 latestPersist()
             } else {
                 true
             }
 
-            // Затем сохраняем историю.
             if (
                 file != null &&
                 latestMode == CanvasMode.TEXT
@@ -1687,9 +1646,10 @@ fun ScenariosPane(
             }
         }
     }
+
     // =====================================================
-// GRAPH RECOVERY DIALOG
-// =====================================================
+    // GRAPH RECOVERY DIALOG
+    // =====================================================
 
     if (showGraphRecoveryDialog) {
 
@@ -1703,6 +1663,7 @@ fun ScenariosPane(
 
             AlertDialog(
                 onDismissRequest = {
+
                     runCatching {
                         graphRecoveryStore.clear(
                             projectRoot,
@@ -1710,7 +1671,15 @@ fun ScenariosPane(
                         )
                     }
 
+                    runCatching {
+                        graphHistoryStore.clear(
+                            projectRoot,
+                            recoveryFile
+                        )
+                    }
+
                     pendingGraphRecovery = null
+                    pendingGraphHistory = null
                     pendingRecoveryFile = null
                     showGraphRecoveryDialog = false
                 },
@@ -1755,7 +1724,6 @@ fun ScenariosPane(
                                 recovery.graph
                             )
 
-                            // Восстанавливаем Undo/Redo для аварийной копии.
                             pendingGraphHistory?.let { history ->
 
                                 val restored = canvasController.restoreHistory(
@@ -1790,6 +1758,18 @@ fun ScenariosPane(
                         onClick = {
 
                             runCatching {
+                                graphRecoveryStore.clear(
+                                    projectRoot,
+                                    recoveryFile
+                                )
+                            }.onFailure {
+                                println(
+                                    "ScriptFX Studio: не удалось удалить резервную копию: " +
+                                            it.message
+                                )
+                            }
+
+                            runCatching {
                                 graphHistoryStore.clear(
                                     projectRoot,
                                     recoveryFile
@@ -1815,7 +1795,6 @@ fun ScenariosPane(
     }
 }
 
-
 // =====================================================
 // CANVAS TOOLBAR
 // =====================================================
@@ -1823,12 +1802,14 @@ fun ScenariosPane(
 @Composable
 private fun CanvasToolbar(
     controller: NodeCanvasController,
+    historyManager: ProjectHistoryManager,
     dirty: Boolean,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val canUndo by controller.canUndo
-    val canRedo by controller.canRedo
+
+    val canUndo by historyManager.canUndo
+    val canRedo by historyManager.canRedo
 
     Surface(
         modifier = modifier,
@@ -1839,6 +1820,7 @@ private fun CanvasToolbar(
             StudioColors.Border
         )
     ) {
+
         Row(
             modifier = Modifier.padding(
                 horizontal = 6.dp,
@@ -1846,6 +1828,7 @@ private fun CanvasToolbar(
             ),
             verticalAlignment = Alignment.CenterVertically
         ) {
+
             if (dirty) {
                 Text(
                     "●",
@@ -1873,7 +1856,7 @@ private fun CanvasToolbar(
             TextButton(
                 enabled = canUndo,
                 onClick = {
-                    controller.undo()
+                    historyManager.undo()
                 }
             ) {
                 Text(
@@ -1889,7 +1872,7 @@ private fun CanvasToolbar(
             TextButton(
                 enabled = canRedo,
                 onClick = {
-                    controller.redo()
+                    historyManager.redo()
                 }
             ) {
                 Text(
@@ -1948,6 +1931,7 @@ private fun CanvasToolbar(
 // =====================================================
 // SETTINGS PANE
 // =====================================================
+
 @Composable
 fun SettingsPane(
     projectRoot: File,
@@ -2428,7 +2412,9 @@ fun SettingsPane(
     }
 }
 
-
+// =====================================================
+// PROJECT VALIDATION DIALOG
+// =====================================================
 
 @Composable
 private fun ProjectValidationDialog(
@@ -2450,14 +2436,18 @@ private fun ProjectValidationDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+
         title = {
             Text("Проверка проекта")
         },
+
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("Проверено сценариев: ${report.scenariosChecked}")
+                Text(
+                    "Проверено сценариев: ${report.scenariosChecked}"
+                )
 
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -2481,16 +2471,21 @@ private fun ProjectValidationDialog(
                 HorizontalDivider()
 
                 if (report.issues.isEmpty()) {
+
                     Text(
                         "Проблем не обнаружено. Проект прошёл проверку.",
                         color = MaterialTheme.colorScheme.primary
                     )
+
                 } else {
+
                     LazyColumn(
                         modifier = Modifier.heightIn(max = 380.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+
                         items(report.issues) { entry ->
+
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -2501,12 +2496,14 @@ private fun ProjectValidationDialog(
                                     .padding(10.dp),
                                 verticalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
+
                                 Text(
                                     entry.scenarioFile,
                                     style = MaterialTheme.typography.labelMedium
                                 )
 
                                 val severityColor = when (entry.issue.severity) {
+
                                     GraphIssueSeverity.ERROR ->
                                         MaterialTheme.colorScheme.error
 
@@ -2529,6 +2526,7 @@ private fun ProjectValidationDialog(
                                 )
 
                                 entry.issue.nodeId?.let { nodeId ->
+
                                     TextButton(
                                         onClick = {
                                             onOpenIssue(
@@ -2546,8 +2544,11 @@ private fun ProjectValidationDialog(
                 }
             }
         },
+
         confirmButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss
+            ) {
                 Text("Закрыть")
             }
         }
