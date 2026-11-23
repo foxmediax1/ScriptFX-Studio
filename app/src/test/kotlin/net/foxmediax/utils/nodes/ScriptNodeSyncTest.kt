@@ -132,4 +132,34 @@ class ScriptNodeSyncTest {
             }
         )
     }
+
+    @Test
+    fun `standalone startscript command creates START node`() {
+        val graph = ScriptNodeSync.textToGraph(
+            """
+                startscript
+                print "Hello"
+                stopscript
+            """.trimIndent()
+        )
+
+        assertTrue(
+            graph.nodes.any {
+                it.kind == NodeKind.START
+            }
+        )
+
+        assertTrue(
+            graph.nodes.any {
+                it.kind == NodeKind.PRINT
+            }
+        )
+
+        assertTrue(
+            graph.nodes.any {
+                it.kind == NodeKind.END
+            }
+        )
+    }
+
 }
