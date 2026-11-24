@@ -718,6 +718,11 @@ class ProjectVersionRestoreServiceTest {
             "Target version"
         )
 
+        val backupVersion = context.store.createVersion(
+            project,
+            "Automatic backup"
+        )
+
         val workspace = createWorkspace(project)
 
         assertTrue(workspace.mkdirs())
@@ -727,10 +732,26 @@ class ProjectVersionRestoreServiceTest {
             "temporary.txt"
         ).writeText("leftover")
 
-        val journal = context.journalStore.create(
+        var journal = context.journalStore.create(
             projectRoot = project,
             targetVersionId = targetVersion.id,
             workspace = workspace
+        )
+
+        journal = context.journalStore.update(
+            journal,
+            ProjectRestoreJournalStore.State.STAGED
+        )
+
+        journal = context.journalStore.update(
+            journal,
+            state = ProjectRestoreJournalStore.State.BACKUP_CREATED,
+            backupVersionId = backupVersion.id
+        )
+
+        journal = context.journalStore.update(
+            journal,
+            ProjectRestoreJournalStore.State.REPLACING
         )
 
         context.journalStore.update(

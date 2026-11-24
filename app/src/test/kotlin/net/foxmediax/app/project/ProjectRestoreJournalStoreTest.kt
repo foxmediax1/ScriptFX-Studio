@@ -2,17 +2,16 @@ package net.foxmediax.app.project
 
 import java.io.File
 import java.io.IOException
-import java.util.UUID
-import java.util.Properties
 import java.nio.file.Files
+import java.util.Properties
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlin.test.assertFailsWith
 
 class ProjectRestoreJournalStoreTest {
 
@@ -45,11 +44,26 @@ class ProjectRestoreJournalStoreTest {
         return dataRoot to ProjectRestoreJournalStore(dataRoot)
     }
 
+    private fun createJournal(
+        project: File,
+        store: ProjectRestoreJournalStore
+    ): ProjectRestoreJournalStore.Journal {
+        return store.create(
+            projectRoot = project,
+            targetVersionId = targetVersionId,
+            workspace = File(
+                project.parentFile,
+                ".scriptfx-restore-test"
+            )
+        )
+    }
+
     @AfterTest
     fun cleanup() {
         temporaryDirectories.forEach {
             it.deleteRecursively()
         }
+
         temporaryDirectories.clear()
     }
 
@@ -74,8 +88,6 @@ class ProjectRestoreJournalStoreTest {
             workspace = workspace
         )
 
-        // Создаём новый экземпляр Store, чтобы убедиться,
-        // что данные читаются с диска, а не из памяти.
         val reloadedStore = ProjectRestoreJournalStore(dataRoot)
 
         val loaded = reloadedStore.read(project)
@@ -120,10 +132,9 @@ class ProjectRestoreJournalStoreTest {
         val project = createProject("project")
         val (dataRoot, store) = createStore()
 
-        var journal = store.create(
-            projectRoot = project,
-            targetVersionId = targetVersionId,
-            workspace = File(project.parentFile, "restore-workspace")
+        var journal = createJournal(
+            project,
+            store
         )
 
         journal = store.update(
@@ -169,6 +180,285 @@ class ProjectRestoreJournalStoreTest {
     }
 
     // =====================================================
+    // ROLLBACK TRANSITIONS
+    // =====================================================
+
+    @Test
+    fun `rollback failed state can be retried`() {
+
+        val project = createProject("project")
+        val (_, store) = createStore()
+
+        var journal = createJournal(
+            project,
+            store
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.STAGED
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.BACKUP_CREATED,
+            backupVersionId = backupVersionId
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.REPLACING
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.ROLLBACK_REQUIRED
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.ROLLBACK_FAILED
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.ROLLBACK_REQUIRED
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.ROLLBACK_FAILED
+        )
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.ROLLBACK_FAILED,
+            journal.state
+        )
+
+        val loaded = store.read(project)
+
+        assertNotNull(loaded)
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.ROLLBACK_FAILED,
+            loaded.state
+        )
+
+        assertEquals(
+            backupVersionId,
+            loaded.backupVersionId
+        )
+    }
+
+    // =====================================================
+    // COMPLETED IS TERMINAL
+    // =====================================================
+
+    @Test
+    fun `completed state cannot be changed`() {
+
+        val project = createProject("project")
+        val (_, store) = createStore()
+
+        var journal = createJournal(
+            project,
+            store
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.STAGED
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.BACKUP_CREATED,
+            backupVersionId = backupVersionId
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.REPLACING
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.COMPLETED
+        )
+
+        assertFailsWith<IOException> {
+            store.update(
+                journal,
+                ProjectRestoreJournalStore.State.ROLLBACK_REQUIRED
+            )
+        }
+
+        val loaded = store.read(project)
+
+        assertNotNull(loaded)
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.COMPLETED,
+            loaded.state
+        )
+    }
+
+    // =====================================================
+    // INVALID TRANSITION
+    // =====================================================
+
+    @Test
+    fun `update rejects transition from preparing directly to replacing`() {
+
+        val project = createProject("project")
+        val (_, store) = createStore()
+
+        val journal = createJournal(
+            project,
+            store
+        )
+
+        assertFailsWith<IOException> {
+            store.update(
+                journal,
+                ProjectRestoreJournalStore.State.REPLACING
+            )
+        }
+
+        val loaded = store.read(project)
+
+        assertNotNull(loaded)
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.PREPARING,
+            loaded.state
+        )
+    }
+
+    // =====================================================
+    // BACKUP ID REQUIRED
+    // =====================================================
+
+    @Test
+    fun `backup created state requires backup version id`() {
+
+        val project = createProject("project")
+        val (_, store) = createStore()
+
+        var journal = createJournal(
+            project,
+            store
+        )
+
+        journal = store.update(
+            journal,
+            ProjectRestoreJournalStore.State.STAGED
+        )
+
+        assertFailsWith<IOException> {
+            store.update(
+                journal,
+                ProjectRestoreJournalStore.State.BACKUP_CREATED
+            )
+        }
+
+        val loaded = store.read(project)
+
+        assertNotNull(loaded)
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.STAGED,
+            loaded.state
+        )
+
+        assertNull(loaded.backupVersionId)
+    }
+
+    // =====================================================
+    // EXISTING JOURNAL PROTECTION
+    // =====================================================
+
+    @Test
+    fun `create does not overwrite existing journal`() {
+
+        val project = createProject("project")
+        val (_, store) = createStore()
+
+        val original = createJournal(
+            project,
+            store
+        )
+
+        assertFailsWith<IOException> {
+            store.create(
+                projectRoot = project,
+                targetVersionId = backupVersionId,
+                workspace = File(
+                    project.parentFile,
+                    ".scriptfx-restore-second"
+                )
+            )
+        }
+
+        val loaded = store.read(project)
+
+        assertNotNull(loaded)
+
+        assertEquals(
+            original.operationId,
+            loaded.operationId
+        )
+
+        assertEquals(
+            targetVersionId,
+            loaded.targetVersionId
+        )
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.PREPARING,
+            loaded.state
+        )
+    }
+
+    // =====================================================
+    // STALE JOURNAL PROTECTION
+    // =====================================================
+
+    @Test
+    fun `update rejects stale journal snapshot`() {
+
+        val project = createProject("project")
+        val (_, store) = createStore()
+
+        val original = createJournal(
+            project,
+            store
+        )
+
+        store.update(
+            original,
+            ProjectRestoreJournalStore.State.STAGED
+        )
+
+        // Используем старый объект PREPARING.
+        assertFailsWith<IOException> {
+            store.update(
+                original,
+                ProjectRestoreJournalStore.State.STAGED
+            )
+        }
+
+        val loaded = store.read(project)
+
+        assertNotNull(loaded)
+
+        assertEquals(
+            ProjectRestoreJournalStore.State.STAGED,
+            loaded.state
+        )
+    }
+
+    // =====================================================
     // PROJECT ISOLATION
     // =====================================================
 
@@ -183,13 +473,19 @@ class ProjectRestoreJournalStoreTest {
         store.create(
             projectRoot = projectA,
             targetVersionId = targetVersionId,
-            workspace = File(projectA.parentFile, "workspace-a")
+            workspace = File(
+                projectA.parentFile,
+                "workspace-a"
+            )
         )
 
         store.create(
             projectRoot = projectB,
             targetVersionId = backupVersionId,
-            workspace = File(projectB.parentFile, "workspace-b")
+            workspace = File(
+                projectB.parentFile,
+                "workspace-b"
+            )
         )
 
         val journalA = store.read(projectA)
@@ -280,25 +576,21 @@ class ProjectRestoreJournalStoreTest {
         store.create(
             projectRoot = project,
             targetVersionId = targetVersionId,
-            workspace = File(project.parentFile, "restore-workspace")
+            workspace = File(
+                project.parentFile,
+                "restore-workspace"
+            )
         )
 
-        val journalDirectory = File(
-            File(dataRoot, "RestoreJournals"),
-            File.listRoots().firstOrNull()?.let {
-                // Получаем каталог журнала по его фактическому размещению,
-                // не предполагая заранее имя hash-папки.
-                ""
-            } ?: ""
+        val journalsRoot = File(
+            dataRoot,
+            "RestoreJournals"
         )
 
-        val projectJournalDirectory = File(
-            File(dataRoot, "RestoreJournals")
-                .listFiles()
-                ?.singleOrNull()
-                ?: error("Каталог журнала не найден."),
-            ""
-        )
+        val projectJournalDirectory = journalsRoot
+            .listFiles()
+            ?.singleOrNull()
+            ?: error("Каталог журнала не найден.")
 
         val journalFile = File(
             projectJournalDirectory,
@@ -319,7 +611,10 @@ class ProjectRestoreJournalStoreTest {
         )
 
         journalFile.outputStream().use {
-            properties.store(it, "corrupted test journal")
+            properties.store(
+                it,
+                "corrupted test journal"
+            )
         }
 
         assertFailsWith<IOException> {
@@ -341,7 +636,10 @@ class ProjectRestoreJournalStoreTest {
             store.create(
                 projectRoot = project,
                 targetVersionId = "../../outside",
-                workspace = File(project.parentFile, "workspace")
+                workspace = File(
+                    project.parentFile,
+                    "workspace"
+                )
             )
         }
 

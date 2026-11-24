@@ -3,6 +3,7 @@ package net.foxmediax.app.project
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.Properties
@@ -48,6 +49,13 @@ class ProjectRestoreJournalStore(
     // CREATE
     // =====================================================
 
+    /**
+     * Создаёт новый журнал восстановления.
+     *
+     * Существующий журнал нельзя перезаписывать:
+     * он может содержать сведения о незавершённой операции.
+     */
+    @Synchronized
     fun create(
         projectRoot: File,
         targetVersionId: String,
@@ -59,7 +67,33 @@ class ProjectRestoreJournalStore(
         val root = projectRoot.canonicalFile
 
         if (!root.isDirectory) {
-            throw IOException("Папка проекта не существует.")
+            throw IOException(
+                "Папка проекта не существует."
+            )
+        }
+
+        val journalFile = journalFile(root)
+
+        if (
+            Files.exists(
+                journalFile.toPath(),
+                LinkOption.NOFOLLOW_LINKS
+            )
+        ) {
+            throw IOException(
+                "Для проекта уже существует журнал восстановления. " +
+                        "Сначала необходимо обработать предыдущую операцию."
+            )
+        }
+
+        val normalizedWorkspace = workspace.absoluteFile
+            .toPath()
+            .normalize()
+
+        if (!normalizedWorkspace.isAbsolute) {
+            throw IOException(
+                "Путь временной папки должен быть абсолютным."
+            )
         }
 
         val now = System.currentTimeMillis()
@@ -69,9 +103,7 @@ class ProjectRestoreJournalStore(
             projectPath = root.path,
             targetVersionId = targetVersionId,
             backupVersionId = null,
-            workspacePath = workspace.absoluteFile.toPath()
-                .normalize()
-                .toString(),
+            workspacePath = normalizedWorkspace.toString(),
             state = State.PREPARING,
             startedAtMillis = now,
             updatedAtMillis = now
@@ -86,6 +118,13 @@ class ProjectRestoreJournalStore(
     // UPDATE
     // =====================================================
 
+    /**
+     * Обновляет журнал только в том случае, если переданный
+     * объект соответствует последней сохранённой версии.
+     *
+     * Это защищает от обновления устаревшим экземпляром Journal.
+     */
+    @Synchronized
     fun update(
         journal: Journal,
         state: State,
@@ -94,8 +133,31 @@ class ProjectRestoreJournalStore(
 
         validateJournal(journal)
 
-        backupVersionId?.let {
-            requireValidVersionId(it)
+        val root = File(journal.projectPath).canonicalFile
+
+        val persisted = read(root)
+            ?: throw IOException(
+                "Журнал восстановления отсутствует."
+            )
+
+        if (persisted != journal) {
+            throw IOException(
+                "Журнал устарел или был изменён другой операцией."
+            )
+        }
+
+        requireAllowedTransition(
+            from = persisted.state,
+            to = state
+        )
+
+        if (
+            persisted.backupVersionId != null &&
+            backupVersionId != persisted.backupVersionId
+        ) {
+            throw IOException(
+                "Нельзя изменить ID уже созданной резервной версии."
+            )
         }
 
         val updated = journal.copy(
@@ -104,9 +166,76 @@ class ProjectRestoreJournalStore(
             updatedAtMillis = System.currentTimeMillis()
         )
 
+        validateJournal(updated)
         write(updated)
 
         return updated
+    }
+
+    // =====================================================
+    // STATE TRANSITIONS
+    // =====================================================
+
+    /**
+     * Разрешённые переходы состояний:
+     *
+     * PREPARING -> STAGED
+     * STAGED -> BACKUP_CREATED
+     * BACKUP_CREATED -> REPLACING
+     * REPLACING -> COMPLETED
+     * REPLACING -> ROLLBACK_REQUIRED
+     * REPLACING -> ROLLBACK_FAILED
+     * ROLLBACK_REQUIRED -> ROLLBACK_REQUIRED
+     * ROLLBACK_REQUIRED -> ROLLBACK_FAILED
+     * ROLLBACK_FAILED -> ROLLBACK_REQUIRED
+     * ROLLBACK_FAILED -> ROLLBACK_FAILED
+     *
+     * COMPLETED является конечным состоянием.
+     */
+    private fun requireAllowedTransition(
+        from: State,
+        to: State
+    ) {
+
+        val allowed = when (from) {
+
+            State.PREPARING -> setOf(
+                State.STAGED
+            )
+
+            State.STAGED -> setOf(
+                State.BACKUP_CREATED
+            )
+
+            State.BACKUP_CREATED -> setOf(
+                State.REPLACING
+            )
+
+            State.REPLACING -> setOf(
+                State.COMPLETED,
+                State.ROLLBACK_REQUIRED,
+                State.ROLLBACK_FAILED
+            )
+
+            State.ROLLBACK_REQUIRED -> setOf(
+                State.ROLLBACK_REQUIRED,
+                State.ROLLBACK_FAILED
+            )
+
+            State.ROLLBACK_FAILED -> setOf(
+                State.ROLLBACK_REQUIRED,
+                State.ROLLBACK_FAILED
+            )
+
+            State.COMPLETED -> emptySet()
+        }
+
+        if (to !in allowed) {
+            throw IOException(
+                "Недопустимый переход журнала восстановления: " +
+                        "$from -> $to."
+            )
+        }
     }
 
     // =====================================================
@@ -115,21 +244,34 @@ class ProjectRestoreJournalStore(
 
     /**
      * null — журнал отсутствует.
+     *
      * IOException — журнал существует, но не может быть прочитан
      * или не прошёл проверку.
      */
+    @Synchronized
     fun read(projectRoot: File): Journal? {
 
         val root = projectRoot.canonicalFile
         val file = journalFile(root)
 
-        if (!file.exists()) {
+        if (
+            !Files.exists(
+                file.toPath(),
+                LinkOption.NOFOLLOW_LINKS
+            )
+        ) {
             return null
         }
 
         if (Files.isSymbolicLink(file.toPath())) {
             throw IOException(
                 "Файл журнала восстановления является символической ссылкой."
+            )
+        }
+
+        if (!file.isFile) {
+            throw IOException(
+                "Путь журнала восстановления не является файлом."
             )
         }
 
@@ -172,16 +314,36 @@ class ProjectRestoreJournalStore(
                 )
 
             val journal = Journal(
-                operationId = required(properties, "operationId"),
-                projectPath = required(properties, "projectPath"),
-                targetVersionId = required(properties, "targetVersionId"),
+                operationId = required(
+                    properties,
+                    "operationId"
+                ),
+                projectPath = required(
+                    properties,
+                    "projectPath"
+                ),
+                targetVersionId = required(
+                    properties,
+                    "targetVersionId"
+                ),
                 backupVersionId = properties
                     .getProperty("backupVersionId")
-                    ?.takeIf { it.isNotBlank() },
-                workspacePath = required(properties, "workspacePath"),
+                    ?.takeIf {
+                        it.isNotBlank()
+                    },
+                workspacePath = required(
+                    properties,
+                    "workspacePath"
+                ),
                 state = state,
-                startedAtMillis = requiredLong(properties, "startedAtMillis"),
-                updatedAtMillis = requiredLong(properties, "updatedAtMillis")
+                startedAtMillis = requiredLong(
+                    properties,
+                    "startedAtMillis"
+                ),
+                updatedAtMillis = requiredLong(
+                    properties,
+                    "updatedAtMillis"
+                )
             )
 
             validateJournal(journal)
@@ -210,20 +372,33 @@ class ProjectRestoreJournalStore(
 
     /**
      * Удаляет только журнал.
+     *
      * Рабочую папку восстановления намеренно не трогает.
      */
+    @Synchronized
     fun delete(projectRoot: File): Boolean {
 
         val root = projectRoot.canonicalFile
         val file = journalFile(root)
 
-        if (!file.exists()) {
+        if (
+            !Files.exists(
+                file.toPath(),
+                LinkOption.NOFOLLOW_LINKS
+            )
+        ) {
             return false
         }
 
         if (Files.isSymbolicLink(file.toPath())) {
             throw IOException(
                 "Файл журнала восстановления является символической ссылкой."
+            )
+        }
+
+        if (!file.isFile) {
+            throw IOException(
+                "Путь журнала восстановления не является файлом."
             )
         }
 
@@ -240,13 +415,18 @@ class ProjectRestoreJournalStore(
     // WRITE
     // =====================================================
 
-    private fun write(journal: Journal) {
+    private fun write(
+        journal: Journal
+    ) {
 
         validateJournal(journal)
 
         val directory = journalFile(
             File(journal.projectPath)
         ).parentFile
+            ?: throw IOException(
+                "Не удалось определить каталог журнала."
+            )
 
         ensureSafeDirectory(directory)
 
@@ -275,20 +455,40 @@ class ProjectRestoreJournalStore(
         val properties = Properties().apply {
 
             setProperty("format", FORMAT)
-            setProperty("formatVersion", FORMAT_VERSION.toString())
+            setProperty(
+                "formatVersion",
+                FORMAT_VERSION.toString()
+            )
 
-            setProperty("operationId", journal.operationId)
-            setProperty("projectPath", journal.projectPath)
+            setProperty(
+                "operationId",
+                journal.operationId
+            )
 
-            setProperty("targetVersionId", journal.targetVersionId)
+            setProperty(
+                "projectPath",
+                journal.projectPath
+            )
+
+            setProperty(
+                "targetVersionId",
+                journal.targetVersionId
+            )
+
             setProperty(
                 "backupVersionId",
                 journal.backupVersionId.orEmpty()
             )
 
-            setProperty("workspacePath", journal.workspacePath)
+            setProperty(
+                "workspacePath",
+                journal.workspacePath
+            )
 
-            setProperty("state", journal.state.name)
+            setProperty(
+                "state",
+                journal.state.name
+            )
 
             setProperty(
                 "startedAtMillis",
@@ -340,7 +540,9 @@ class ProjectRestoreJournalStore(
     // JOURNAL PATH
     // =====================================================
 
-    private fun journalFile(projectRoot: File): File {
+    private fun journalFile(
+        projectRoot: File
+    ): File {
 
         val key = sha256(
             projectRoot.canonicalPath
@@ -370,18 +572,21 @@ class ProjectRestoreJournalStore(
         directory: File
     ) {
 
-        val journalsRoot = File(
-            dataRoot,
-            "RestoreJournals"
-        )
-
         if (Files.isSymbolicLink(dataRoot.toPath())) {
             throw IOException(
                 "Каталог данных Studio является символической ссылкой."
             )
         }
 
-        if (!journalsRoot.exists() && !journalsRoot.mkdirs()) {
+        val journalsRoot = File(
+            dataRoot,
+            "RestoreJournals"
+        )
+
+        if (
+            !journalsRoot.exists() &&
+            !journalsRoot.mkdirs()
+        ) {
             throw IOException(
                 "Не удалось создать каталог журналов восстановления."
             )
@@ -393,7 +598,10 @@ class ProjectRestoreJournalStore(
             )
         }
 
-        if (!directory.exists() && !directory.mkdirs()) {
+        if (
+            !directory.exists() &&
+            !directory.mkdirs()
+        ) {
             throw IOException(
                 "Не удалось создать каталог журнала."
             )
@@ -416,20 +624,30 @@ class ProjectRestoreJournalStore(
     }
 
     // =====================================================
-    // VALIDATION
+    // JOURNAL VALIDATION
     // =====================================================
 
     private fun validateJournal(
         journal: Journal
     ) {
 
+        val parsedOperationId = try {
+            UUID.fromString(journal.operationId)
+        } catch (error: IllegalArgumentException) {
+            throw IOException(
+                "Некорректный ID операции восстановления.",
+                error
+            )
+        }
+
         if (
-            !runCatching {
-                UUID.fromString(journal.operationId)
-            }.isSuccess
+            !parsedOperationId.toString().equals(
+                journal.operationId,
+                ignoreCase = true
+            )
         ) {
             throw IOException(
-                "Некорректный ID операции восстановления."
+                "Некорректный формат ID операции восстановления."
             )
         }
 
@@ -450,6 +668,44 @@ class ProjectRestoreJournalStore(
             )
         }
 
+        val projectPath = File(
+            journal.projectPath
+        )
+
+        if (!projectPath.isAbsolute) {
+            throw IOException(
+                "Путь проекта в журнале не является абсолютным."
+            )
+        }
+
+        if (
+            projectPath.canonicalPath !=
+            journal.projectPath
+        ) {
+            throw IOException(
+                "Путь проекта в журнале не нормализован."
+            )
+        }
+
+        val workspacePath = File(
+            journal.workspacePath
+        ).toPath()
+
+        if (!workspacePath.isAbsolute) {
+            throw IOException(
+                "Путь временной папки в журнале не является абсолютным."
+            )
+        }
+
+        if (
+            workspacePath.normalize().toString() !=
+            journal.workspacePath
+        ) {
+            throw IOException(
+                "Путь временной папки в журнале не нормализован."
+            )
+        }
+
         if (
             journal.startedAtMillis <= 0L ||
             journal.updatedAtMillis < journal.startedAtMillis
@@ -458,7 +714,36 @@ class ProjectRestoreJournalStore(
                 "Некорректное время в журнале восстановления."
             )
         }
+
+        val requiresBackup = journal.state in setOf(
+            State.BACKUP_CREATED,
+            State.REPLACING,
+            State.ROLLBACK_REQUIRED,
+            State.ROLLBACK_FAILED,
+            State.COMPLETED
+        )
+
+        if (requiresBackup && journal.backupVersionId == null) {
+            throw IOException(
+                "Для состояния ${journal.state} отсутствует ID резервной версии."
+            )
+        }
+
+        val backupMustBeAbsent = journal.state in setOf(
+            State.PREPARING,
+            State.STAGED
+        )
+
+        if (backupMustBeAbsent && journal.backupVersionId != null) {
+            throw IOException(
+                "Для состояния ${journal.state} резервная версия не должна быть указана."
+            )
+        }
     }
+
+    // =====================================================
+    // VERSION ID VALIDATION
+    // =====================================================
 
     private fun requireValidVersionId(
         id: String
@@ -470,6 +755,10 @@ class ProjectRestoreJournalStore(
             )
         }
     }
+
+    // =====================================================
+    // PROPERTY HELPERS
+    // =====================================================
 
     private fun required(
         properties: Properties,
